@@ -81,7 +81,7 @@ pub fn Conn(comptime ClientType: type) type {
         }
 
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            log.debug("{} connected socket {}", .{ self.address, socket });
+            // log.debug("{} connected socket {}", .{ self.address, socket });
             self.connected(socket, self.address);
             try self.client.onConnect();
         }
@@ -238,7 +238,7 @@ pub fn Conn(comptime ClientType: type) type {
 
             self.state = .closed;
             self.sendCompleted();
-            log.debug("{} closed", .{self.address});
+            // log.debug("{} closed", .{self.address});
             self.client.onClose();
         }
     };
