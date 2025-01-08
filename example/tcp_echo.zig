@@ -6,6 +6,9 @@ const posix = std.posix;
 
 const log = std.log.scoped(.tcp);
 
+// To send file and receive echo output:
+// $ nc -w 1 localhost 9000 < some-file-name
+//
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
