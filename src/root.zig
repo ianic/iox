@@ -34,7 +34,6 @@ pub const tls = struct {
     pub fn Server(T: type) type {
         return _tls.Conn(T, .server);
     }
-    //pub const Server = @import("tls_server.zig").Conn;
 };
 
 pub const timer = @import("timer.zig");

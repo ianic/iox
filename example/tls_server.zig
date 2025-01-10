@@ -67,8 +67,13 @@ const Listener = struct {
         self.tcp_listener.deinit();
     }
 
+    // when tcp connection is accepted on socket
     pub fn onAccept(self: *Self, conn: *Conn, socket: posix.socket_t, addr: net.Address) !void {
-        try conn.init(self, socket, addr, self.opt);
+        try conn.init(self, socket);
+        conn.tls.init(self.allocator, self.io_loop, conn);
+        // starts tls handshake
+        try conn.tls.connected(socket, addr, self.opt);
+        log.debug("{} connected {}", .{ socket, addr });
     }
 
     pub fn onClose(_: *Self) void {}
@@ -79,32 +84,20 @@ const Listener = struct {
 };
 
 const Conn = struct {
-    allocator: mem.Allocator,
     listener: *Listener,
     tls: io.tls.Server(*Conn),
     socket: posix.socket_t,
 
-    fn init(
-        self: *Conn,
-        listener: *Listener,
-        socket: posix.socket_t,
-        addr: net.Address,
-        opt: io.tls.ServerOptions,
-    ) !void {
-        const allocator = listener.allocator;
+    fn init(self: *Conn, listener: *Listener, socket: posix.socket_t) !void {
         self.* = .{
-            .allocator = allocator,
             .listener = listener,
             .socket = socket,
             .tls = undefined,
         };
-        self.tls.init(allocator, listener.io_loop, self);
-        try self.tls.connected(socket, addr, opt);
-        log.debug("{} connected {}", .{ socket, addr });
     }
 
     pub fn onConnect(_: *Conn) !void {
-        // handshake is done
+        // tls handshake is done
     }
 
     pub fn deinit(self: *Conn) void {
