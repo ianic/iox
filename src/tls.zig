@@ -2,19 +2,28 @@ const std = @import("std");
 const assert = std.debug.assert;
 const net = std.net;
 const mem = std.mem;
+const posix = std.posix;
 const io = @import("root.zig");
 const tls = @import("tls");
 
 const log = std.log.scoped(.tls);
 
-pub fn Conn(comptime ClientType: type) type {
+const Side = enum {
+    client,
+    server,
+};
+
+pub fn Conn(comptime ClientType: type, comptime side: Side) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
         client: ClientType,
         tcp_conn: io.tcp.Conn(*Self),
-        tls_conn: tls.asyn.Client(*Self),
+        tls_conn: switch (side) {
+            .client => tls.asyn.Client(*Self),
+            .server => tls.asyn.Server(*Self),
+        },
 
         state: State = .closed,
 
@@ -47,9 +56,16 @@ pub fn Conn(comptime ClientType: type) type {
         // ----------------- client api
 
         pub fn connect(self: *Self, address: net.Address, opt: tls.ClientOptions) !void {
+            assert(side == .client);
             self.tls_conn = try tls.asyn.Client(*Self).init(self.allocator, self, opt);
             self.tcp_conn.connect(address);
             self.state = .connecting;
+        }
+
+        pub fn connected(self: *Self, socket: posix.socket_t, addr: net.Address, opt: tls.ServerOptions) !void {
+            assert(side == .server);
+            self.tcp_conn.connected(socket, addr);
+            self.tls_conn = try tls.asyn.Server(*Self).init(self.allocator, self, opt);
         }
 
         pub fn send(self: *Self, cleartext: []const u8) !void {
@@ -79,7 +95,10 @@ pub fn Conn(comptime ClientType: type) type {
         /// Tls will decrypt it and call onRecvCleartext.
         pub fn onRecv(self: *Self, ciphertext: []u8) !usize {
             return self.tls_conn.onRecv(ciphertext) catch |err| brk: {
-                log.err("tls conn onRecv {}", .{err});
+                switch (err) {
+                    error.EndOfFile => {},
+                    else => log.err("tls conn onRecv {}", .{err}),
+                }
                 self.tcp_conn.close();
                 break :brk 0;
             };

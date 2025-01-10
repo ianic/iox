@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_][]const u8{
         "tcp_echo",
         "tls_conn",
+        "tls_server",
     };
     inline for (examples) |path| {
         const source_file = "example/" ++ path ++ ".zig";
