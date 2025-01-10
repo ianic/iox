@@ -18,6 +18,42 @@ const log = std.log.scoped(.io);
 
 pub const Error = error{OutOfMemory};
 
+pub const RunError = error{
+    OutOfMemory,
+    // Next tick will ring.submit at start
+    SubmissionQueueFull,
+
+    // io_uring enter errors
+    // ref: https://manpages.debian.org/unstable/liburing-dev/io_uring_enter.2.en.html#RETURN_VALUE
+    SignalInterrupt,
+    // hopefully transient errors
+    SystemResources,
+    CompletionQueueOvercommitted,
+    // fatal errors
+    FileDescriptorInvalid,
+    FileDescriptorInBadState,
+    SubmissionQueueEntryInvalid,
+    BufferInvalid,
+    RingShuttingDown,
+    OpcodeNotSupported,
+    Unexpected,
+};
+
+pub fn isTransientError(err: RunError) bool {
+    return switch (err) {
+        error.OutOfMemory,
+        // Next tick will ring.submit at start
+        error.SubmissionQueueFull,
+
+        error.SignalInterrupt,
+        // hopefully transient errors
+        error.SystemResources,
+        error.CompletionQueueOvercommitted,
+        => true,
+        else => false,
+    };
+}
+
 pub const Options = struct {
     /// Number of io_uring sqe entries
     entries: u16 = 16 * 1024,
@@ -99,6 +135,7 @@ pub const Loop = struct {
         try self.tick();
     }
 
+    /// Run the loop once.
     pub fn tick(self: *Loop) !void {
         self.metric.loops.inc(1);
         // Submit prepared sqe-s to the kernel.
@@ -126,6 +163,18 @@ pub const Loop = struct {
         // Process completions.
         if (self.cqe_buf_head < self.cqe_buf_tail)
             try self.flushCompletions();
+    }
+
+    /// Run the loop until signal or error.
+    pub fn run(self: *Loop) RunError!c_int {
+        setSignalHandler();
+        while (true) {
+            if (getSignal()) |sig| return sig;
+            self.tick() catch |err| switch (err) {
+                error.SignalInterrupt => continue,
+                else => return err,
+            };
+        }
     }
 
     fn setTimestamp(self: *Loop) void {
@@ -969,3 +1018,32 @@ const Metric = struct {
         }
     }
 };
+
+fn getSignal() ?c_int {
+    const sig = signal.load(.monotonic);
+    if (sig == posix.SIG.UNUSED)
+        return null;
+    signal.store(posix.SIG.UNUSED, .release);
+    return sig;
+}
+
+var signal = std.atomic.Value(c_int).init(posix.SIG.UNUSED);
+
+fn setSignalHandler() void {
+    var act = posix.Sigaction{
+        .handler = .{
+            .handler = struct {
+                fn wrapper(sig: c_int) callconv(.C) void {
+                    signal.store(sig, .release);
+                }
+            }.wrapper,
+        },
+        .mask = posix.empty_sigset,
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.TERM, &act, null);
+    posix.sigaction(posix.SIG.INT, &act, null);
+    posix.sigaction(posix.SIG.USR1, &act, null);
+    posix.sigaction(posix.SIG.USR2, &act, null);
+    posix.sigaction(posix.SIG.PIPE, &act, null);
+}

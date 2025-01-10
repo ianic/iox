@@ -7,6 +7,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const dep_opts = .{ .target = target, .optimize = optimize };
+    const tls_module = b.dependency("tls", dep_opts).module("tls");
+
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Every executable or library we compile will be based on one or more modules.
@@ -19,6 +22,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib_mod.addImport("tls", tls_module);
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -48,6 +52,7 @@ pub fn build(b: *std.Build) void {
     // Build all examples from example/ path
     const examples = [_][]const u8{
         "tcp_echo",
+        "tls_conn",
     };
     inline for (examples) |path| {
         const source_file = "example/" ++ path ++ ".zig";

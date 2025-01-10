@@ -6,13 +6,29 @@ pub const Error = io.Error;
 pub const Options = io.Options;
 
 pub const tcp = struct {
-    const tcp_ = @import("tcp.zig");
-    pub const Conn = tcp_.Conn;
-    pub const Listener = tcp_.Listener;
+    const _tcp = @import("tcp.zig");
+    pub const Conn = _tcp.Conn;
+    pub const Listener = _tcp.Listener;
 };
 
 pub const udp = struct {
     pub const Sender = @import("udp.zig").Sender;
+};
+
+pub const tls = struct {
+    const _lib = @import("tls");
+    const _tls = @import("tls.zig");
+
+    pub const CipherSuite = _lib.CipherSuite;
+    pub const cipher_suites = _lib.cipher_suites;
+    pub const PrivateKey = _lib.PrivateKey;
+    pub const ClientOptions = _lib.ClientOptions;
+    pub const ServerOptions = _lib.ServerOptions;
+    pub const CertBundle = _lib.CertBundle;
+    pub const CertKeyPair = _lib.CertKeyPair;
+    pub const key_log = _lib.key_log;
+
+    pub const Conn = _tls.Conn;
 };
 
 pub const timer = @import("timer.zig");
