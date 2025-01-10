@@ -14,7 +14,7 @@ pub fn Conn(comptime ClientType: type) type {
         allocator: mem.Allocator,
         client: ClientType,
         tcp_conn: io.tcp.Conn(*Self),
-        tls_conn: tls.AsyncConnection(*Self),
+        tls_conn: tls.asyn.Client(*Self),
 
         state: State = .closed,
 
@@ -47,7 +47,7 @@ pub fn Conn(comptime ClientType: type) type {
         // ----------------- client api
 
         pub fn connect(self: *Self, address: net.Address, opt: tls.ClientOptions) !void {
-            self.tls_conn = try tls.AsyncConnection(*Self).init(self.allocator, self, opt);
+            self.tls_conn = try tls.asyn.Client(*Self).init(self.allocator, self, opt);
             self.tcp_conn.connect(address);
             self.state = .connecting;
         }

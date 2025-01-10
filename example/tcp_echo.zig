@@ -6,8 +6,12 @@ const posix = std.posix;
 
 const log = std.log.scoped(.tcp);
 
-// To send file and receive echo output:
-// $ nc -w 1 localhost 9000 < some-file-name
+// Start server:
+//   $ zig build && zig-out/bin/tcp_echo
+// Send file and receive echo output:
+//   $ nc -w 1 localhost 9000 < some-file-name
+// Send some text:
+//   $ echo '1\n2\n3' | nc -w 1 localhost 9000
 //
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -23,9 +27,7 @@ pub fn main() !void {
     try listener.init(allocator, &io_loop, try listenSocket(addr));
     defer listener.deinit();
 
-    while (true) {
-        try io_loop.tick();
-    }
+    _ = try io_loop.run();
 }
 
 const Listener = struct {
