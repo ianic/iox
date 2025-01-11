@@ -43,73 +43,71 @@ const Listener = struct {
     allocator: mem.Allocator,
     socket: posix.socket_t,
     io_loop: *io.Loop,
-    tcp_listener: io.tcp.Listener(*Self, Conn),
-    opt: io.tls.ServerOptions,
+    parent: io.tcp.Listener(*Self, Conn),
+    tls_opt: io.tls.ServerOptions,
 
     pub fn init(
         self: *Self,
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         socket: posix.socket_t,
-        opt: io.tls.ServerOptions,
+        tls_opt: io.tls.ServerOptions,
     ) !void {
         self.* = .{
             .allocator = allocator,
             .socket = socket,
             .io_loop = io_loop,
-            .tcp_listener = undefined,
-            .opt = opt,
+            .parent = undefined,
+            .tls_opt = tls_opt,
         };
-        self.tcp_listener.init(allocator, io_loop, socket, self);
+        self.parent.init(allocator, io_loop, socket, self);
     }
 
     pub fn deinit(self: *Self) void {
-        self.tcp_listener.deinit();
+        self.parent.deinit();
     }
 
-    // when tcp connection is accepted on socket
+    /// Called by parent listener when it accepts new tcp connection.
     pub fn onAccept(self: *Self, conn: *Conn, socket: posix.socket_t, addr: net.Address) !void {
-        try conn.init(self, socket);
-        conn.tls.init(self.allocator, self.io_loop, conn);
-        // starts tls handshake
-        try conn.tls.connected(socket, addr, self.opt);
+        // Init connection
+        conn.* = .{ .listener = self, .tls_conn = undefined };
+        conn.tls_conn.init(self.allocator, self.io_loop, conn);
+        // Start tls handshake
+        try conn.tls_conn.connected(socket, addr, self.tls_opt);
         log.debug("{} connected {}", .{ socket, addr });
     }
 
+    /// Called when parent listener is closed.
     pub fn onClose(_: *Self) void {}
 
     pub fn destroy(self: *Self, conn: *Conn) void {
-        self.tcp_listener.destroy(conn);
+        self.parent.destroy(conn);
     }
 };
 
 const Conn = struct {
-    listener: *Listener,
-    tls: io.tls.Server(*Conn),
-    socket: posix.socket_t,
+    const Self = @This();
 
-    fn init(self: *Conn, listener: *Listener, socket: posix.socket_t) !void {
-        self.* = .{
-            .listener = listener,
-            .socket = socket,
-            .tls = undefined,
-        };
+    listener: *Listener,
+    tls_conn: io.tls.Server(*Self),
+
+    pub fn deinit(self: *Self) void {
+        self.tls_conn.deinit();
     }
 
-    pub fn onConnect(_: *Conn) !void {
+    /// Called by tls connection when it successfully finishes handshake.
+    pub fn onConnect(_: *Self) !void {
         // tls handshake is done
     }
 
-    pub fn deinit(self: *Conn) void {
-        self.tls.deinit();
+    /// Called by tls connection with cleartext data when it receives chipertext
+    /// and decrytps it.
+    pub fn onRecv(self: *Self, bytes: []const u8) !void {
+        try self.tls_conn.send(bytes);
     }
 
-    pub fn onRecv(self: *Conn, bytes: []const u8) !void {
-        try self.tls.send(bytes);
-    }
-
-    pub fn onClose(self: *Conn) void {
-        log.debug("{} closed", .{self.socket});
+    /// Called by tls connection when it is closed.
+    pub fn onClose(self: *Self) void {
         self.deinit();
         self.listener.destroy(self);
     }

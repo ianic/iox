@@ -304,7 +304,18 @@ test "recv_buf remove" {
     try testing.expectEqualStrings("iso medo u ducan", recv_buf.buf);
 }
 
-pub fn Listener(comptime ClientType: type, comptime ConnType: type) type {
+/// Tcp Listener generic over child listener type and child connection type.
+/// Holds list of all live connections, so we can deinit them when needed.
+/// ChildType need to implement:
+///
+///   onAccept(ChildType, *ConnType, posix.socket_t, net.Address) - called when
+///   new tcp connection is accepted and new ConnType is allocated, child should
+///   finish initialization
+///   Note: child has to call destroy(*ConnType) when it is closed!
+///
+///   onClose() - called when listener closes
+///
+pub fn Listener(comptime ChildType: type, comptime ConnType: type) type {
     return struct {
         const Self = @This();
 
@@ -314,7 +325,7 @@ pub fn Listener(comptime ClientType: type, comptime ConnType: type) type {
         accept_op: io.Op = .{},
         close_op: io.Op = .{},
         conns: std.AutoHashMap(*ConnType, void),
-        client: ClientType,
+        child: ChildType,
         metric: struct {
             // Total number of
             accept: usize = 0, // accepted connections
@@ -326,14 +337,14 @@ pub fn Listener(comptime ClientType: type, comptime ConnType: type) type {
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             socket: posix.socket_t,
-            client: ClientType,
+            child: ChildType,
         ) void {
             self.* = .{
                 .allocator = allocator,
                 .io_loop = io_loop,
                 .socket = socket,
                 .conns = std.AutoHashMap(*ConnType, void).init(allocator),
-                .client = client,
+                .child = child,
             };
             self.accept_op = io.Op.accept(socket, self, onAccept, onAcceptFail);
             self.io_loop.submit(&self.accept_op);
@@ -355,9 +366,9 @@ pub fn Listener(comptime ClientType: type, comptime ConnType: type) type {
             try self.conns.ensureUnusedCapacity(1);
             const conn = try self.allocator.create(ConnType);
             errdefer self.allocator.destroy(conn);
-            // call client to init connection
-            try self.client.onAccept(conn, socket, addr);
-            // add to live connections list
+            // Pass new connection to the child to finish initialization
+            try self.child.onAccept(conn, socket, addr);
+            // Add to list of live connections
             self.conns.putAssumeCapacityNoClobber(conn, {});
             self.metric.accept +%= 1;
         }
@@ -378,6 +389,7 @@ pub fn Listener(comptime ClientType: type, comptime ConnType: type) type {
             self.close();
         }
 
+        /// Stop listening and shutdown listening socket
         pub fn close(self: *Self) void {
             if (self.close_op.active()) return;
             if (self.accept_op.active()) {
@@ -389,7 +401,7 @@ pub fn Listener(comptime ClientType: type, comptime ConnType: type) type {
                 self.socket = 0;
                 return self.io_loop.submit(&self.close_op);
             }
-            self.client.onClose();
+            self.child.onClose();
         }
     };
 }
