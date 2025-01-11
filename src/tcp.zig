@@ -244,6 +244,93 @@ pub fn Conn(comptime ChildType: type) type {
     };
 }
 
+pub fn Client(comptime ChildType: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: mem.Allocator,
+        io_loop: *io.Loop,
+        child: ChildType,
+        address: std.net.Address,
+        conn: Conn(ChildType),
+
+        connect_op: io.Op = .{},
+        close_op: io.Op = .{},
+
+        pub fn init(
+            self: *Self,
+            allocator: mem.Allocator,
+            io_loop: *io.Loop,
+            child: ChildType,
+            address: net.Address,
+        ) void {
+            self.* = .{
+                .allocator = allocator,
+                .io_loop = io_loop,
+                .child = child,
+                .address = address,
+                .conn = Conn(ChildType).init(allocator, io_loop, child),
+            };
+            self.connect();
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.conn.deinit();
+        }
+
+        /// Start connect operation. `onConnect` callback will be fired when
+        /// finished.
+        fn connect(self: *Self) void {
+            assert(self.conn.state == .closed);
+            assert(!self.connect_op.active() and !self.close_op.active());
+
+            self.connect_op = io.Op.connect(
+                .{ .addr = &self.address },
+                self,
+                onConnect,
+                onConnectFail,
+            );
+            self.io_loop.submit(&self.connect_op);
+        }
+
+        fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
+            // log.debug("{} connected socket {}", .{ self.address, socket });
+            // TODO: remove address
+            self.conn.connected(socket, self.address);
+            try self.child.onConnect();
+        }
+
+        fn onConnectFail(self: *Self, err: ?anyerror) void {
+            if (err) |e| log.info("{} connect failed {}", .{ self.address, e });
+            self.close();
+        }
+
+        pub fn send(self: *Self, buf: []const u8) io.Error!void {
+            try self.conn.send(buf);
+        }
+
+        fn onCancel(self: *Self, _: ?anyerror) void {
+            self.close();
+        }
+
+        pub fn close(self: *Self) void {
+            if (self.conn.state != .closed)
+                return self.conn.close();
+
+            if (self.connect_op.active() and !self.close_op.active()) {
+                self.close_op = io.Op.cancel(&self.connect_op, self, onCancel);
+                return self.io_loop.submit(&self.close_op);
+            }
+
+            if (self.connect_op.active() or
+                self.close_op.active())
+                return;
+
+            self.child.onClose();
+        }
+    };
+}
+
 // iovlen in msghdr is limited by IOV_MAX in <limits.h>. On modern Linux
 // systems, the limit is 1024. Each message has header and body: 2 iovecs that
 // limits number of messages in a batch to 512.

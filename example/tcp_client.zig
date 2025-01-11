@@ -28,19 +28,16 @@ const Conn = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    tcp_conn: io.tcp.Conn(*Self),
+    tcp_cli: io.tcp.Client(*Self),
     send_len: usize = 1,
 
     pub fn init(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) void {
-        self.* = .{
-            .allocator = allocator,
-            .tcp_conn = io.tcp.Conn(*Self).init(allocator, io_loop, self),
-        };
-        self.tcp_conn.connect(addr);
+        self.* = .{ .allocator = allocator, .tcp_cli = undefined };
+        self.tcp_cli.init(allocator, io_loop, self, addr);
     }
 
     pub fn deinit(self: *Self) void {
-        self.tcp_conn.deinit();
+        self.tcp_cli.deinit();
     }
 
     pub fn onConnect(self: *Self) !void {
@@ -60,7 +57,7 @@ const Conn = struct {
 
     fn send(self: *Self) !void {
         if (self.send_len > 1024 * 1024) {
-            self.tcp_conn.close();
+            self.tcp_cli.close();
             posix.raise(posix.SIG.USR1) catch {};
             return;
         }
@@ -69,7 +66,7 @@ const Conn = struct {
         const buf = try self.allocator.alloc(u8, self.send_len);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
         log.debug("sending {} bytes", .{buf.len});
-        try self.tcp_conn.send(buf);
+        try self.tcp_cli.send(buf);
     }
 
     pub fn onSend(self: *Self, buf: []const u8) void {
@@ -81,7 +78,3 @@ const Conn = struct {
         self.deinit();
     }
 };
-
-pub fn listenSocket(addr: net.Address) !posix.socket_t {
-    return (try addr.listen(.{ .reuse_address = true })).stream.handle;
-}

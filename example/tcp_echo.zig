@@ -86,6 +86,7 @@ const Conn = struct {
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+        // log.debug("{*} recv {} bytes", .{ self, bytes.len });
         const buf = try self.allocator.dupe(u8, bytes);
         try self.tcp_conn.send(buf);
         return bytes.len;

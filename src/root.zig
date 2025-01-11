@@ -9,6 +9,7 @@ pub const tcp = struct {
     const _tcp = @import("tcp.zig");
     pub const Conn = _tcp.Conn;
     pub const Listener = _tcp.Listener;
+    pub const Client = _tcp.Client;
 };
 
 pub const udp = struct {
