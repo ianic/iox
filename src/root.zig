@@ -29,12 +29,14 @@ pub const tls = struct {
     pub const CertKeyPair = _lib.CertKeyPair;
     pub const key_log = _lib.key_log;
 
-    pub fn Conn(T: type) type {
-        return _tls.Conn(T, .client);
-    }
-    pub fn Server(T: type) type {
-        return _tls.Conn(T, .server);
-    }
+    // pub fn Conn(T: type) type {
+    //     return _tls.Conn(T, .client);
+    // }
+    // pub fn Server(T: type) type {
+    //     return _tls.Conn(T, .server);
+    // }
+    pub const Client = _tls.Client;
+    pub const Conn = _tls.Conn;
 };
 
 pub const timer = @import("timer.zig");

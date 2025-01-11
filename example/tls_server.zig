@@ -57,10 +57,10 @@ const Listener = struct {
             .allocator = allocator,
             .socket = socket,
             .io_loop = io_loop,
-            .parent = undefined,
+            .parent = io.tcp.Listener(*Self, Conn).init(allocator, io_loop, socket, self),
             .tls_opt = tls_opt,
         };
-        self.parent.init(allocator, io_loop, socket, self);
+        self.parent.run();
     }
 
     pub fn deinit(self: *Self) void {
@@ -71,10 +71,9 @@ const Listener = struct {
     pub fn onAccept(self: *Self, conn: *Conn, socket: posix.socket_t, addr: net.Address) !void {
         // Init connection
         conn.* = .{ .listener = self, .tls_conn = undefined };
-        conn.tls_conn.init(self.allocator, self.io_loop, conn);
-        // Start tls handshake
-        try conn.tls_conn.connected(socket, addr, self.tls_opt);
-        log.debug("{} connected {}", .{ socket, addr });
+        // Init tls
+        try conn.tls_conn.init(self.allocator, self.io_loop, conn, socket, self.tls_opt);
+        log.debug("{*} connected socket: {} addr: {}", .{ conn, socket, addr });
     }
 
     /// Called when parent listener is closed.
@@ -89,7 +88,7 @@ const Conn = struct {
     const Self = @This();
 
     listener: *Listener,
-    tls_conn: io.tls.Server(*Self),
+    tls_conn: io.tls.Conn(*Self),
 
     pub fn deinit(self: *Self) void {
         self.tls_conn.deinit();
@@ -108,6 +107,7 @@ const Conn = struct {
 
     /// Called by tls connection when it is closed.
     pub fn onClose(self: *Self) void {
+        log.debug("{*} closed", .{self});
         self.deinit();
         self.listener.destroy(self);
     }

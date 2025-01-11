@@ -52,12 +52,12 @@ const Https = struct {
     const Self = @This();
     allocator: mem.Allocator,
     host: []const u8,
-    conn: io.tls.Conn(*Https),
+    conn: io.tls.Client(*Https),
 
     fn init(
         self: *Self,
         allocator: mem.Allocator,
-        ev: *io.Loop,
+        io_loop: *io.Loop,
         address: std.net.Address,
         opt: io.tls.ClientOptions,
     ) !void {
@@ -66,9 +66,7 @@ const Https = struct {
             .host = opt.host,
             .conn = undefined,
         };
-        self.conn.init(allocator, ev, self);
-        errdefer self.conn.deinit();
-        try self.conn.connect(address, opt);
+        try self.conn.init(allocator, io_loop, self, address, opt);
     }
 
     fn deinit(self: *Self) void {
