@@ -7,11 +7,8 @@ const io = @import("io.zig");
 
 const log = std.log.scoped(.io_tcp);
 
-/// ClientType has to implement callback methods
+/// ChildType has to implement callback methods
 ///
-/// onConnect()*            - after successful connect operation
-///                           * optional, clients which have socket (from listen)
-///                             should start with connected method
 /// onRecv([]u8) !usize     - called with received data,
 ///                           returns number of consumed bytes,
 ///                           non consumed part will be preserved for following calls
@@ -26,11 +23,9 @@ pub fn Conn(comptime ChildType: type) type {
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         child: ChildType,
-        address: std.net.Address = undefined,
-        socket: posix.socket_t = 0,
+        socket: posix.socket_t,
         state: State = .closed,
 
-        connect_op: io.Op = .{},
         close_op: io.Op = .{},
         recv_op: io.Op = .{},
         recv_buf: RecvBuf,
@@ -41,7 +36,6 @@ pub fn Conn(comptime ChildType: type) type {
 
         const State = enum {
             closed,
-            connecting,
             connected,
             closing,
         };
@@ -51,6 +45,8 @@ pub fn Conn(comptime ChildType: type) type {
                 .allocator = allocator,
                 .io_loop = io_loop,
                 .child = child,
+                .socket = 0,
+                .state = .closed,
                 .send_list = std.ArrayList(posix.iovec_const).init(allocator),
                 .recv_buf = RecvBuf.init(allocator),
             };
@@ -62,41 +58,11 @@ pub fn Conn(comptime ChildType: type) type {
             self.recv_buf.free();
         }
 
-        /// Start connect operation. `onConnect` callback will be fired when
-        /// finished.
-        pub fn connect(self: *Self, address: net.Address) void {
-            assert(self.state == .closed);
-            assert(!self.connect_op.active() and !self.send_op.active() and !self.recv_op.active() and !self.close_op.active());
-            assert(self.socket == 0);
-
-            self.address = address;
-            self.connect_op = io.Op.connect(
-                .{ .addr = &self.address },
-                self,
-                onConnect,
-                onConnectFail,
-            );
-            self.io_loop.submit(&self.connect_op);
-            self.state = .connecting;
-        }
-
-        fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            // log.debug("{} connected socket {}", .{ self.address, socket });
-            self.connected(socket, self.address);
-            try self.child.onConnect();
-        }
-
-        fn onConnectFail(self: *Self, err: ?anyerror) void {
-            if (err) |e| log.info("{} connect failed {}", .{ self.address, e });
-            self.close();
-        }
-
-        /// Set connected tcp socket. After successful child connect operation
-        /// or after server listener accepts child socket.
-        pub fn connected(self: *Self, socket: posix.socket_t, address: net.Address) void {
+        /// Set connected tcp socket.
+        pub fn onConnect(self: *Self, socket: posix.socket_t) void {
             self.socket = socket;
-            self.address = address;
             self.state = .connected;
+            // start multishot receive
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
             self.io_loop.submit(&self.recv_op);
         }
@@ -125,6 +91,7 @@ pub fn Conn(comptime ChildType: type) type {
             try self.sendPending();
         }
 
+        // TODO: rename
         pub fn prepSend(self: *Self, buf: []const u8) io.Error!void {
             try self.send_list.append(.{ .base = buf.ptr, .len = buf.len });
         }
@@ -176,7 +143,6 @@ pub fn Conn(comptime ChildType: type) type {
         }
 
         fn onSend(self: *Self) io.Error!void {
-            // log.debug("{} onSend", .{self.address});
             self.sendCompleted();
             try self.sendPending();
         }
@@ -184,7 +150,7 @@ pub fn Conn(comptime ChildType: type) type {
         fn onSendFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
                 error.BrokenPipe, error.ConnectionResetByPeer => {},
-                else => log.err("{} send failed {}", .{ self.address, err }),
+                else => log.err("send failed {}", .{err}),
             }
             self.sendCompleted();
             self.close();
@@ -203,7 +169,7 @@ pub fn Conn(comptime ChildType: type) type {
         fn onRecvFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
                 error.EndOfFile, error.ConnectionResetByPeer => {},
-                else => log.err("{} recv failed {}", .{ self.address, err }),
+                else => log.err("recv failed {}", .{err}),
             }
             self.close();
         }
@@ -216,29 +182,24 @@ pub fn Conn(comptime ChildType: type) type {
             if (self.state == .closed) return;
             if (self.state != .closing) self.state = .closing;
 
-            if (self.connect_op.active() and !self.close_op.active()) {
-                self.close_op = io.Op.cancel(&self.connect_op, self, onCancel);
-                return self.io_loop.submit(&self.close_op);
-            }
-            if (self.socket != 0 and !self.close_op.active()) {
-                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
-                self.socket = 0;
-                return self.io_loop.submit(&self.close_op);
-            }
             if (self.recv_op.active() and !self.close_op.active()) {
                 self.close_op = io.Op.cancel(&self.recv_op, self, onCancel);
                 return self.io_loop.submit(&self.close_op);
             }
 
-            if (self.connect_op.active() or
-                self.recv_op.active() or
+            if (self.socket != 0 and !self.close_op.active()) {
+                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
+                self.socket = 0;
+                return self.io_loop.submit(&self.close_op);
+            }
+
+            if (self.recv_op.active() or
                 self.send_op.active() or
                 self.close_op.active())
                 return;
 
             self.state = .closed;
             self.sendCompleted();
-            // log.debug("{} closed", .{self.address});
             self.child.onClose();
         }
     };
@@ -258,20 +219,18 @@ pub fn Client(comptime ChildType: type) type {
         close_op: io.Op = .{},
 
         pub fn init(
-            self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             child: ChildType,
             address: net.Address,
-        ) void {
-            self.* = .{
+        ) Self {
+            return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
                 .child = child,
                 .address = address,
                 .conn = Conn(ChildType).init(allocator, io_loop, child),
             };
-            self.connect();
         }
 
         pub fn deinit(self: *Self) void {
@@ -280,7 +239,7 @@ pub fn Client(comptime ChildType: type) type {
 
         /// Start connect operation. `onConnect` callback will be fired when
         /// finished.
-        fn connect(self: *Self) void {
+        pub fn connect(self: *Self) void {
             assert(self.conn.state == .closed);
             assert(!self.connect_op.active() and !self.close_op.active());
 
@@ -294,9 +253,7 @@ pub fn Client(comptime ChildType: type) type {
         }
 
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            // log.debug("{} connected socket {}", .{ self.address, socket });
-            // TODO: remove address
-            self.conn.connected(socket, self.address);
+            self.conn.onConnect(socket);
             try self.child.onConnect();
         }
 
@@ -420,20 +377,23 @@ pub fn Listener(comptime ChildType: type, comptime ConnType: type) type {
         } = .{},
 
         pub fn init(
-            self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             socket: posix.socket_t,
             child: ChildType,
-        ) void {
-            self.* = .{
+        ) Self {
+            return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
                 .socket = socket,
-                .conns = std.AutoHashMap(*ConnType, void).init(allocator),
                 .child = child,
+                .conns = std.AutoHashMap(*ConnType, void).init(allocator),
             };
-            self.accept_op = io.Op.accept(socket, self, onAccept, onAcceptFail);
+        }
+
+        /// Start multishot accept
+        pub fn run(self: *Self) void {
+            self.accept_op = io.Op.accept(self.socket, self, onAccept, onAcceptFail);
             self.io_loop.submit(&self.accept_op);
         }
 

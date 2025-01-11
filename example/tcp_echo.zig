@@ -34,7 +34,6 @@ const Listener = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    socket: posix.socket_t,
     io_loop: *io.Loop,
     parent: io.tcp.Listener(*Self, Conn),
 
@@ -46,11 +45,10 @@ const Listener = struct {
     ) !void {
         self.* = .{
             .allocator = allocator,
-            .socket = socket,
             .io_loop = io_loop,
-            .parent = undefined,
+            .parent = io.tcp.Listener(*Self, Conn).init(allocator, io_loop, socket, self),
         };
-        self.parent.init(allocator, io_loop, socket, self);
+        self.parent.run();
     }
 
     pub fn deinit(self: *Self) void {
@@ -63,7 +61,7 @@ const Listener = struct {
             .listener = self,
             .tcp_conn = io.tcp.Conn(*Conn).init(self.allocator, self.io_loop, conn),
         };
-        conn.tcp_conn.connected(socket, addr);
+        conn.tcp_conn.onConnect(socket);
         log.debug("{*} connected socket: {}, addr: {}", .{ conn, socket, addr });
     }
 

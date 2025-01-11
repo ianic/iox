@@ -32,8 +32,11 @@ const Conn = struct {
     send_len: usize = 1,
 
     pub fn init(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) void {
-        self.* = .{ .allocator = allocator, .tcp_cli = undefined };
-        self.tcp_cli.init(allocator, io_loop, self, addr);
+        self.* = .{
+            .allocator = allocator,
+            .tcp_cli = io.tcp.Client(*Self).init(allocator, io_loop, self, addr),
+        };
+        self.tcp_cli.connect();
     }
 
     pub fn deinit(self: *Self) void {
