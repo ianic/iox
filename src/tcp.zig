@@ -19,13 +19,13 @@ const log = std.log.scoped(.io_tcp);
 ///                           buffer lifetime has to be until onSend is called
 /// onClose                 - after tcp connection is closed
 ///
-pub fn Conn(comptime ClientType: type) type {
+pub fn Conn(comptime ChildType: type) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
         io_loop: *io.Loop,
-        client: ClientType,
+        child: ChildType,
         address: std.net.Address = undefined,
         socket: posix.socket_t = 0,
         state: State = .closed,
@@ -46,11 +46,11 @@ pub fn Conn(comptime ClientType: type) type {
             closing,
         };
 
-        pub fn init(allocator: mem.Allocator, io_loop: *io.Loop, client: ClientType) Self {
+        pub fn init(allocator: mem.Allocator, io_loop: *io.Loop, child: ChildType) Self {
             return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
-                .client = client,
+                .child = child,
                 .send_list = std.ArrayList(posix.iovec_const).init(allocator),
                 .recv_buf = RecvBuf.init(allocator),
             };
@@ -83,7 +83,7 @@ pub fn Conn(comptime ClientType: type) type {
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
             // log.debug("{} connected socket {}", .{ self.address, socket });
             self.connected(socket, self.address);
-            try self.client.onConnect();
+            try self.child.onConnect();
         }
 
         fn onConnectFail(self: *Self, err: ?anyerror) void {
@@ -91,8 +91,8 @@ pub fn Conn(comptime ClientType: type) type {
             self.close();
         }
 
-        /// Set connected tcp socket. After successful client connect operation
-        /// or after server listener accepts client socket.
+        /// Set connected tcp socket. After successful child connect operation
+        /// or after server listener accepts child socket.
         pub fn connected(self: *Self, socket: posix.socket_t, address: net.Address) void {
             self.socket = socket;
             self.address = address;
@@ -101,12 +101,12 @@ pub fn Conn(comptime ClientType: type) type {
             self.io_loop.submit(&self.recv_op);
         }
 
-        /// Send `buf` to the tcp connection. It is client's responsibility to
+        /// Send `buf` to the tcp connection. It is child's responsibility to
         /// ensure lifetime of `buf` until `onSend(buf)` is called.
         pub fn send(self: *Self, buf: []const u8) io.Error!void {
             if (self.state == .closed)
-                return self.client.onSend(buf);
-            errdefer self.client.onSend(buf);
+                return self.child.onSend(buf);
+            errdefer self.child.onSend(buf);
 
             if (buf.len == 0)
                 return try self.sendPending();
@@ -162,16 +162,16 @@ pub fn Conn(comptime ClientType: type) type {
         }
 
         /// Send operation is completed, release pending resources and notify
-        /// client that we are done with sending their buffers.
+        /// child that we are done with sending their buffers.
         fn sendCompleted(self: *Self) void {
             const iovlen: u32 = @intCast(self.send_msghdr.iovlen);
             self.send_msghdr.iovlen = 0;
-            // Call client callback for each sent buffer
+            // Call child callback for each sent buffer
             for (self.send_iov[0..iovlen]) |vec| {
                 var buf: []const u8 = undefined;
                 buf.ptr = vec.base;
                 buf.len = vec.len;
-                self.client.onSend(buf);
+                self.child.onSend(buf);
             }
         }
 
@@ -193,7 +193,7 @@ pub fn Conn(comptime ClientType: type) type {
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
             const buf = try self.recv_buf.append(bytes);
             errdefer self.recv_buf.remove(bytes.len) catch self.close();
-            const n = try self.client.onRecv(buf);
+            const n = try self.child.onRecv(buf);
             try self.recv_buf.set(buf[n..]);
 
             if (!self.recv_op.hasMore() and self.state == .connected)
@@ -239,7 +239,7 @@ pub fn Conn(comptime ClientType: type) type {
             self.state = .closed;
             self.sendCompleted();
             // log.debug("{} closed", .{self.address});
-            self.client.onClose();
+            self.child.onClose();
         }
     };
 }
