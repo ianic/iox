@@ -13,12 +13,12 @@ const Side = enum {
     server,
 };
 
-pub fn Conn(comptime ClientType: type, comptime side: Side) type {
+pub fn Conn(comptime ChildType: type, comptime side: Side) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
-        client: ClientType,
+        child: ChildType,
         tcp_conn: io.tcp.Conn(*Self),
         tls_conn: switch (side) {
             .client => tls.asyn.Client(*Self),
@@ -38,12 +38,12 @@ pub fn Conn(comptime ClientType: type, comptime side: Side) type {
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            client: ClientType,
+            child: ChildType,
         ) void {
             self.* = .{
                 .allocator = allocator,
                 .tcp_conn = io.tcp.Conn(*Self).init(allocator, io_loop, self),
-                .client = client,
+                .child = child,
                 .tls_conn = undefined,
             };
         }
@@ -53,7 +53,7 @@ pub fn Conn(comptime ClientType: type, comptime side: Side) type {
             self.tcp_conn.deinit();
         }
 
-        // ----------------- client api
+        // ----------------- child api
 
         pub fn connect(self: *Self, address: net.Address, opt: tls.ClientOptions) !void {
             assert(side == .client);
@@ -107,7 +107,7 @@ pub fn Conn(comptime ClientType: type, comptime side: Side) type {
         /// Tcp connection is closed.
         pub fn onClose(self: *Self) void {
             self.state = .closed;
-            self.client.onClose();
+            self.child.onClose();
         }
 
         /// Ciphertext is copied to the kernel tcp buffers.
@@ -121,15 +121,15 @@ pub fn Conn(comptime ClientType: type, comptime side: Side) type {
         /// tls handshake finished
         pub fn onHandshake(self: *Self) void {
             self.state = .connected;
-            self.client.onConnect() catch |err| {
-                log.err("client onConnect {}", .{err});
+            self.child.onConnect() catch |err| {
+                log.err("onConnect {}", .{err});
                 self.tcp_conn.close();
             };
         }
 
         /// decrypted cleartext received from tcp
         pub fn onRecvCleartext(self: *Self, cleartext: []const u8) !void {
-            try self.client.onRecv(cleartext);
+            try self.child.onRecv(cleartext);
         }
 
         /// tls sends ciphertext to tcp
