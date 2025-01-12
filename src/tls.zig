@@ -6,13 +6,6 @@ const posix = std.posix;
 const io = @import("root.zig");
 const tls = @import("tls");
 
-const log = std.log.scoped(.tls);
-
-const Side = enum {
-    client,
-    server,
-};
-
 pub fn Client(comptime ChildType: type) type {
     return struct {
         const Self = @This();
@@ -62,7 +55,7 @@ pub fn Client(comptime ChildType: type) type {
 
         /// tcp is connected start tls handshake
         pub fn onConnect(self: *Self) !void {
-            self.tls_lib.startHandshake() catch |err| self.closeErr(err);
+            self.tls_lib.onConnect() catch |err| self.closeErr(err);
         }
 
         /// Ciphertext bytes received from tcp, pass it to tls.
@@ -100,6 +93,12 @@ pub fn Client(comptime ChildType: type) type {
         /// tls sends ciphertext to tcp
         pub fn sendCiphertext(self: *Self, ciphertext: []const u8) !void {
             try self.tcp_cli.send(ciphertext);
+        }
+
+        pub fn getError(self: *Self) ?anyerror {
+            if (self.err) |e| return e;
+            if (self.tcp_cli.getError()) |e| return e;
+            return null;
         }
     };
 }

@@ -27,17 +27,17 @@ pub fn main() !void {
     });
     defer io_loop.deinit();
 
-    var root_ca = try io.tls.CertBundle.fromSystem(allocator);
+    var root_ca = try io.tls.options.CertBundle.fromSystem(allocator);
     defer root_ca.deinit(allocator);
     const addr = try getAddress(allocator, host_arg, port);
 
-    var diagnostic: io.tls.ClientOptions.Diagnostic = .{};
-    const opt: io.tls.ClientOptions = .{
-        .host = host_arg,
+    var diagnostic: io.tls.options.Client.Diagnostic = .{};
+    const opt: io.tls.options.Client = .{
+        .host = host,
         .root_ca = root_ca,
-        .cipher_suites = io.tls.cipher_suites.all,
-        .key_log_callback = io.tls.key_log.callback,
         .diagnostic = &diagnostic,
+        // example of how to get handshake failure, use some really old cipher
+        // .cipher_suites = &[_]io.tls.options.CipherSuite{.RSA_WITH_AES_128_CBC_SHA},
     };
     var https: Https = undefined;
     try https.init(allocator, &io_loop, addr, opt);
@@ -45,6 +45,10 @@ pub fn main() !void {
 
     _ = try io_loop.run();
 
+    if (https.tls_cli.getError()) |err| {
+        log.err("https {}", .{err});
+        return;
+    }
     showDiagnostic(&diagnostic, host_arg);
 }
 
@@ -52,30 +56,30 @@ const Https = struct {
     const Self = @This();
     allocator: mem.Allocator,
     host: []const u8,
-    conn: io.tls.Client(*Https),
+    tls_cli: io.tls.Client(*Https),
 
     fn init(
         self: *Self,
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         address: std.net.Address,
-        opt: io.tls.ClientOptions,
+        opt: io.tls.options.Client,
     ) !void {
         self.* = .{
             .allocator = allocator,
             .host = opt.host,
-            .conn = undefined,
+            .tls_cli = undefined,
         };
-        try self.conn.init(allocator, io_loop, self, address, opt);
+        try self.tls_cli.init(allocator, io_loop, self, address, opt);
     }
 
     fn deinit(self: *Self) void {
-        self.conn.deinit();
+        self.tls_cli.deinit();
     }
 
     pub fn onConnect(self: *Self) !void {
         const request = try std.fmt.allocPrint(self.allocator, "GET / HTTP/1.1\r\nHost: {s}\r\n\r\n", .{self.host});
-        try self.conn.send(request);
+        try self.tls_cli.send(request);
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) !void {
@@ -86,15 +90,13 @@ const Https = struct {
             std.mem.trimRight(u8, bytes, "\r\n"),
             "</html>",
         ) or std.ascii.endsWithIgnoreCase(bytes, "\r\n0\r\n\r\n"))
-            self.conn.close();
+            self.tls_cli.close();
     }
 
     pub fn onClose(self: *Self) void {
         //log.debug("onClose", .{});
         _ = self;
-        posix.raise(posix.SIG.USR1) catch |err| {
-            log.err("raise {}", .{err});
-        };
+        posix.raise(posix.SIG.USR1) catch {};
     }
 };
 
@@ -107,7 +109,7 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
     return list.addrs[0];
 }
 
-pub fn showDiagnostic(stats: *io.tls.ClientOptions.Diagnostic, domain: []const u8) void {
+pub fn showDiagnostic(stats: *io.tls.options.Client.Diagnostic, domain: []const u8) void {
     std.debug.print(
         "\n{s}\n\t tls version: {s}\n\t cipher: {s}\n\t named group: {s}\n\t signature scheme: {s}\n",
         .{

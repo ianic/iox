@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_][]const u8{
         "tcp_echo",
         "tcp_client",
-        "tls_conn",
+        "tls_client",
         "tls_server",
     };
     inline for (examples) |path| {

@@ -20,21 +20,7 @@ pub const tls = struct {
     const _lib = @import("tls");
     const _tls = @import("tls.zig");
 
-    pub const CipherSuite = _lib.CipherSuite;
-    pub const cipher_suites = _lib.cipher_suites;
-    pub const PrivateKey = _lib.PrivateKey;
-    pub const ClientOptions = _lib.ClientOptions;
-    pub const ServerOptions = _lib.ServerOptions;
-    pub const CertBundle = _lib.CertBundle;
-    pub const CertKeyPair = _lib.CertKeyPair;
-    pub const key_log = _lib.key_log;
-
-    // pub fn Conn(T: type) type {
-    //     return _tls.Conn(T, .client);
-    // }
-    // pub fn Server(T: type) type {
-    //     return _tls.Conn(T, .server);
-    // }
+    pub const options = _lib.options;
     pub const Client = _tls.Client;
     pub const Conn = _tls.Conn;
 };

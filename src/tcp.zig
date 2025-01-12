@@ -25,6 +25,7 @@ pub fn Conn(comptime ChildType: type) type {
         child: ChildType,
         socket: posix.socket_t,
         state: State = .closed,
+        err: ?anyerror = null,
 
         close_op: io.Op = .{},
         recv_op: io.Op = .{},
@@ -149,16 +150,20 @@ pub fn Conn(comptime ChildType: type) type {
 
         fn onSendFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
-                error.BrokenPipe, error.ConnectionResetByPeer => {},
+                error.BrokenPipe, error.ConnectionResetByPeer, error.OperationCanceled => {},
                 else => log.err("send failed {}", .{err}),
             }
             self.sendCompleted();
+            if (self.err == null) self.err = err;
             self.close();
         }
 
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
             const buf = try self.recv_buf.append(bytes);
-            errdefer self.recv_buf.remove(bytes.len) catch self.close();
+            errdefer self.recv_buf.remove(bytes.len) catch |err| {
+                if (self.err == null) self.err = err;
+                self.close();
+            };
             const n = try self.child.onRecv(buf);
             try self.recv_buf.set(buf[n..]);
 
@@ -168,9 +173,10 @@ pub fn Conn(comptime ChildType: type) type {
 
         fn onRecvFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
-                error.EndOfFile, error.ConnectionResetByPeer => {},
+                error.EndOfFile, error.ConnectionResetByPeer, error.OperationCanceled => {},
                 else => log.err("recv failed {}", .{err}),
             }
+            if (self.err == null and err != error.OperationCanceled) self.err = err;
             self.close();
         }
 
@@ -214,6 +220,7 @@ pub fn Client(comptime ChildType: type) type {
         child: ChildType,
         address: std.net.Address,
         conn: Conn(ChildType),
+        err: ?anyerror = null,
 
         connect_op: io.Op = .{},
         close_op: io.Op = .{},
@@ -257,8 +264,8 @@ pub fn Client(comptime ChildType: type) type {
             try self.child.onConnect();
         }
 
-        fn onConnectFail(self: *Self, err: ?anyerror) void {
-            if (err) |e| log.info("{} connect failed {}", .{ self.address, e });
+        fn onConnectFail(self: *Self, mybe_err: ?anyerror) void {
+            self.err = mybe_err;
             self.close();
         }
 
@@ -284,6 +291,12 @@ pub fn Client(comptime ChildType: type) type {
                 return;
 
             self.child.onClose();
+        }
+
+        pub fn getError(self: *Self) ?anyerror {
+            if (self.err) |e| return e;
+            if (self.conn.err) |e| return e;
+            return null;
         }
     };
 }

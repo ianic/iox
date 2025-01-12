@@ -125,7 +125,7 @@ pub const Loop = struct {
 
     pub fn drain(self: *Loop) !void {
         while (self.metric.all.active() > 0) {
-            log.debug("draining active operations: {}", .{self.metric.all.active()});
+            // log.debug("draining active operations: {}", .{self.metric.all.active()});
             try self.tick();
         }
     }
@@ -655,7 +655,6 @@ pub const Op = struct {
                         loop.submit(op);
                     },
                     else => |errno| {
-                        log.err("socket create failed {}", .{errFromErrno(errno)});
                         fail(ctx, errFromErrno(errno));
                     },
                 }
