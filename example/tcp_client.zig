@@ -61,7 +61,6 @@ const Conn = struct {
     fn send(self: *Self) !void {
         if (self.send_len > 1024 * 1024) {
             self.tcp_cli.close();
-            posix.raise(posix.SIG.USR1) catch {};
             return;
         }
 
@@ -69,7 +68,11 @@ const Conn = struct {
         const buf = try self.allocator.alloc(u8, self.send_len);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
         log.debug("sending {} bytes", .{buf.len});
-        try self.tcp_cli.send(buf);
+
+        try self.tcp_cli.sendZc(buf);
+        // example of sendVZc
+        // try self.tcp_cli.sendVZc(&[_][]const u8{buf});
+
     }
 
     pub fn onSend(self: *Self, buf: []const u8) void {
@@ -78,6 +81,6 @@ const Conn = struct {
 
     pub fn onClose(self: *Self) void {
         log.debug("{*} closed", .{self});
-        self.deinit();
+        posix.raise(posix.SIG.USR1) catch {};
     }
 };

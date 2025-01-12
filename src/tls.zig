@@ -92,7 +92,7 @@ pub fn Client(comptime ChildType: type) type {
 
         /// tls sends ciphertext to tcp
         pub fn sendCiphertext(self: *Self, ciphertext: []const u8) !void {
-            try self.tcp_cli.send(ciphertext);
+            try self.tcp_cli.sendZc(ciphertext);
         }
 
         pub fn getError(self: *Self) ?anyerror {
@@ -184,7 +184,7 @@ pub fn Conn(comptime ChildType: type) type {
 
         /// tls sends ciphertext to tcp
         pub fn sendCiphertext(self: *Self, ciphertext: []const u8) !void {
-            try self.tcp_conn.send(ciphertext);
+            try self.tcp_conn.sendZc(ciphertext);
         }
     };
 }

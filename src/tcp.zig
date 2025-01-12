@@ -57,6 +57,7 @@ pub fn Conn(comptime ChildType: type) type {
             self.allocator.free(self.send_iov);
             self.send_list.deinit();
             self.recv_buf.free();
+            self.* = undefined;
         }
 
         /// Set connected tcp socket.
@@ -68,12 +69,11 @@ pub fn Conn(comptime ChildType: type) type {
             self.io_loop.submit(&self.recv_op);
         }
 
-        /// Send `buf` to the tcp connection. It is child's responsibility to
-        /// ensure lifetime of `buf` until `onSend(buf)` is called.
-        pub fn send(self: *Self, buf: []const u8) io.Error!void {
+        /// Zero copy send it is callers responsibility to ensure lifetime of
+        /// `buf` until `onSend(buf)` is called.
+        pub fn sendZc(self: *Self, buf: []const u8) io.Error!void {
             if (self.state == .closed)
                 return self.child.onSend(buf);
-            errdefer self.child.onSend(buf);
 
             if (buf.len == 0)
                 return try self.sendPending();
@@ -89,12 +89,26 @@ pub fn Conn(comptime ChildType: type) type {
             }
 
             try self.send_list.append(.{ .base = buf.ptr, .len = buf.len });
+            errdefer _ = self.send_list.pop(); // reset send_list on error
             try self.sendPending();
         }
 
-        // TODO: rename
-        pub fn prepSend(self: *Self, buf: []const u8) io.Error!void {
-            try self.send_list.append(.{ .base = buf.ptr, .len = buf.len });
+        /// Vectorized zero copy send.
+        /// Example:
+        ///   sendVZc(&[_][]const u8{buf1, buf2, buf3});
+        pub fn sendVZc(self: *Self, vec: []const []const u8) io.Error!void {
+            if (self.state == .closed) {
+                for (vec) |buf| self.child.onSend(buf);
+                return;
+            }
+            try self.send_list.ensureUnusedCapacity(vec.len);
+
+            const send_list_len = self.send_list.items.len;
+            for (vec) |buf|
+                self.send_list.appendAssumeCapacity(.{ .base = buf.ptr, .len = buf.len });
+
+            errdefer self.send_list.items.len = send_list_len; // reset send_list
+            try self.sendPending();
         }
 
         /// Start send operation for buffers accumulated in send_list.
@@ -242,6 +256,7 @@ pub fn Client(comptime ChildType: type) type {
 
         pub fn deinit(self: *Self) void {
             self.conn.deinit();
+            self.* = undefined;
         }
 
         /// Start connect operation. `onConnect` callback will be fired when
@@ -269,8 +284,12 @@ pub fn Client(comptime ChildType: type) type {
             self.close();
         }
 
-        pub fn send(self: *Self, buf: []const u8) io.Error!void {
-            try self.conn.send(buf);
+        pub fn sendZc(self: *Self, buf: []const u8) io.Error!void {
+            try self.conn.sendZc(buf);
+        }
+
+        pub fn sendVZc(self: *Self, vec: []const []const u8) io.Error!void {
+            try self.conn.sendVZc(vec);
         }
 
         fn onCancel(self: *Self, _: ?anyerror) void {
