@@ -101,8 +101,9 @@ const Conn = struct {
 
     /// Called by tls connection with cleartext data when it receives chipertext
     /// and decrytps it.
-    pub fn onRecv(self: *Self, bytes: []const u8) !void {
+    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
         try self.tls_conn.send(bytes);
+        return bytes.len;
     }
 
     /// Called by tls connection when it is closed.

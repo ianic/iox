@@ -5,6 +5,7 @@ const mem = std.mem;
 const posix = std.posix;
 const io = @import("root.zig");
 const tls = @import("tls");
+const RecvBuf = @import("tcp.zig").RecvBuf;
 
 pub fn Client(comptime ChildType: type) type {
     return struct {
@@ -13,6 +14,7 @@ pub fn Client(comptime ChildType: type) type {
         child: ChildType,
         tcp_cli: io.tcp.Client(*Self),
         tls_lib: tls.asyn.Client(*Self),
+        recv_buf: RecvBuf,
         err: ?anyerror = null,
 
         pub fn init(
@@ -27,6 +29,7 @@ pub fn Client(comptime ChildType: type) type {
                 .child = child,
                 .tcp_cli = io.tcp.Client(*Self).init(allocator, io_loop, self, address),
                 .tls_lib = try tls.asyn.Client(*Self).init(allocator, self, opt),
+                .recv_buf = RecvBuf.init(allocator),
             };
             self.tcp_cli.connect();
         }
@@ -34,6 +37,7 @@ pub fn Client(comptime ChildType: type) type {
         pub fn deinit(self: *Self) void {
             self.tcp_cli.deinit();
             self.tls_lib.deinit();
+            self.recv_buf.free();
         }
 
         fn closeErr(self: *Self, err: anyerror) void {
@@ -86,8 +90,17 @@ pub fn Client(comptime ChildType: type) type {
         }
 
         /// decrypted cleartext received from tcp
-        pub fn onRecvCleartext(self: *Self, cleartext: []const u8) !void {
-            try self.child.onRecv(cleartext);
+        pub fn onRecvCleartext(self: *Self, cleartext: []u8) !void {
+            const buf = try self.recv_buf.append(cleartext);
+            errdefer self.recv_buf.remove(cleartext.len) catch |err| {
+                if (self.err == null) self.err = err;
+                self.close();
+            };
+            const n = try self.child.onRecv(buf);
+            self.recv_buf.set(buf[n..]) catch |err| {
+                if (self.err == null) self.err = err;
+                self.close();
+            };
         }
 
         /// tls sends ciphertext to tcp
@@ -110,6 +123,7 @@ pub fn Conn(comptime ChildType: type) type {
         child: ChildType,
         tcp_conn: io.tcp.Conn(*Self),
         tls_lib: tls.asyn.Conn(*Self),
+        recv_buf: RecvBuf,
         err: ?anyerror = null,
 
         pub fn init(
@@ -124,6 +138,7 @@ pub fn Conn(comptime ChildType: type) type {
                 .tcp_conn = io.tcp.Conn(*Self).init(allocator, io_loop, self),
                 .child = child,
                 .tls_lib = try tls.asyn.Conn(*Self).init(allocator, self, opt),
+                .recv_buf = RecvBuf.init(allocator),
             };
             self.tcp_conn.onConnect(socket);
         }
@@ -131,6 +146,7 @@ pub fn Conn(comptime ChildType: type) type {
         pub fn deinit(self: *Self) void {
             self.tls_lib.deinit();
             self.tcp_conn.deinit();
+            self.recv_buf.free();
         }
 
         fn closeErr(self: *Self, err: anyerror) void {
@@ -170,7 +186,7 @@ pub fn Conn(comptime ChildType: type) type {
             self.tls_lib.onSend(ciphertext);
         }
 
-        // ----------------- tls callbacks
+        // ----------------- tls lib callbacks
 
         /// tls handshake finished
         pub fn onHandshake(self: *Self) void {
@@ -178,8 +194,17 @@ pub fn Conn(comptime ChildType: type) type {
         }
 
         /// decrypted cleartext received from tcp
-        pub fn onRecvCleartext(self: *Self, cleartext: []const u8) !void {
-            try self.child.onRecv(cleartext);
+        pub fn onRecvCleartext(self: *Self, cleartext: []u8) !void {
+            const buf = try self.recv_buf.append(cleartext);
+            errdefer self.recv_buf.remove(cleartext.len) catch |err| {
+                if (self.err == null) self.err = err;
+                self.close();
+            };
+            const n = try self.child.onRecv(buf);
+            self.recv_buf.set(buf[n..]) catch |err| {
+                if (self.err == null) self.err = err;
+                self.close();
+            };
         }
 
         /// tls sends ciphertext to tcp

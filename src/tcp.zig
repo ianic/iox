@@ -7,6 +7,12 @@ const io = @import("io.zig");
 
 const log = std.log.scoped(.io_tcp);
 
+// iovlen in msghdr is limited by IOV_MAX in <limits.h>. On modern Linux
+// systems, the limit is 1024. Each message has header and body: 2 iovecs that
+// limits number of messages in a batch to 512.
+// ref: https://man7.org/linux/man-pages/man2/readv.2.html
+const max_iov = 1024;
+
 /// ChildType has to implement callback methods
 ///
 /// onRecv([]u8) !usize     - called with received data,
@@ -179,7 +185,10 @@ pub fn Conn(comptime ChildType: type) type {
                 self.close();
             };
             const n = try self.child.onRecv(buf);
-            try self.recv_buf.set(buf[n..]);
+            self.recv_buf.set(buf[n..]) catch |err| {
+                if (self.err == null) self.err = err;
+                self.close();
+            };
 
             if (!self.recv_op.hasMore() and self.state == .connected)
                 self.io_loop.submit(&self.recv_op);
@@ -319,12 +328,6 @@ pub fn Client(comptime ChildType: type) type {
         }
     };
 }
-
-// iovlen in msghdr is limited by IOV_MAX in <limits.h>. On modern Linux
-// systems, the limit is 1024. Each message has header and body: 2 iovecs that
-// limits number of messages in a batch to 512.
-// ref: https://man7.org/linux/man-pages/man2/readv.2.html
-const max_iov = 1024;
 
 pub const RecvBuf = struct {
     allocator: mem.Allocator,

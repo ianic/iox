@@ -51,10 +51,11 @@ pub fn build(b: *std.Build) void {
 
     // Build all examples from example/ path
     const examples = [_][]const u8{
-        "tcp_echo",
-        "tcp_client",
+        "tcp_echo_server",
+        "tcp_echo_client",
+        "tls_echo_server",
+        "tls_echo_client",
         "tls_client",
-        "tls_server",
     };
     inline for (examples) |path| {
         const source_file = "example/" ++ path ++ ".zig";

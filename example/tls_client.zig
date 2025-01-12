@@ -54,9 +54,10 @@ pub fn main() !void {
 
 const Https = struct {
     const Self = @This();
+
     allocator: mem.Allocator,
     host: []const u8,
-    tls_cli: io.tls.Client(*Https),
+    tls_cli: io.tls.Client(*Self),
 
     fn init(
         self: *Self,
@@ -82,7 +83,7 @@ const Https = struct {
         try self.tls_cli.send(request);
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !void {
+    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
         //log.debug("recv {} bytes: {s}", .{ bytes.len, bytes }); //bytes[0..@min(128, bytes.len)] });
         std.debug.print("{s}", .{bytes});
 
@@ -91,6 +92,8 @@ const Https = struct {
             "</html>",
         ) or std.ascii.endsWithIgnoreCase(bytes, "\r\n0\r\n\r\n"))
             self.tls_cli.close();
+
+        return bytes.len;
     }
 
     pub fn onClose(self: *Self) void {
