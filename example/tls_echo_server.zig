@@ -21,9 +21,9 @@ pub fn main() !void {
     // use certs from tls.zig project
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
     // Load server certificate key pair
-    var auth = try io.tls.options.CertKeyPair.load(allocator, dir, "localhost_ec/cert.pem", "localhost_ec/key.pem");
+    var auth = try io.tls.config.CertKeyPair.load(allocator, dir, "localhost_ec/cert.pem", "localhost_ec/key.pem");
     defer auth.deinit(allocator);
-    const opt: io.tls.options.Server = .{ .auth = auth };
+    const opt: io.tls.config.Server = .{ .auth = &auth };
 
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{});
@@ -44,14 +44,14 @@ const Listener = struct {
     socket: posix.socket_t,
     io_loop: *io.Loop,
     parent: io.tcp.Listener(*Self, Conn),
-    tls_opt: io.tls.options.Server,
+    tls_opt: io.tls.config.Server,
 
     pub fn init(
         self: *Self,
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         socket: posix.socket_t,
-        tls_opt: io.tls.options.Server,
+        tls_opt: io.tls.config.Server,
     ) !void {
         self.* = .{
             .allocator = allocator,

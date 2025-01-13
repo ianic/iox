@@ -27,12 +27,12 @@ pub fn main() !void {
     });
     defer io_loop.deinit();
 
-    var root_ca = try io.tls.options.CertBundle.fromSystem(allocator);
+    var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
     defer root_ca.deinit(allocator);
     const addr = try getAddress(allocator, host_arg, port);
 
-    var diagnostic: io.tls.options.Client.Diagnostic = .{};
-    const opt: io.tls.options.Client = .{
+    var diagnostic: io.tls.config.Client.Diagnostic = .{};
+    const opt: io.tls.config.Client = .{
         .host = host,
         .root_ca = root_ca,
         .diagnostic = &diagnostic,
@@ -64,7 +64,7 @@ const Https = struct {
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         address: std.net.Address,
-        opt: io.tls.options.Client,
+        opt: io.tls.config.Client,
     ) !void {
         self.* = .{
             .allocator = allocator,
@@ -112,7 +112,7 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
     return list.addrs[0];
 }
 
-pub fn showDiagnostic(stats: *io.tls.options.Client.Diagnostic, domain: []const u8) void {
+pub fn showDiagnostic(stats: *io.tls.config.Client.Diagnostic, domain: []const u8) void {
     std.debug.print(
         "\n{s}\n\t tls version: {s}\n\t cipher: {s}\n\t named group: {s}\n\t signature scheme: {s}\n",
         .{

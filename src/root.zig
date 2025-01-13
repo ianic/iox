@@ -20,7 +20,7 @@ pub const tls = struct {
     const _lib = @import("tls");
     const _tls = @import("tls.zig");
 
-    pub const options = _lib.options;
+    pub const config = _lib.config;
     pub const Client = _tls.Client;
     pub const Conn = _tls.Conn;
 };

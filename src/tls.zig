@@ -23,7 +23,7 @@ pub fn Client(comptime ChildType: type) type {
             io_loop: *io.Loop,
             child: ChildType,
             address: net.Address,
-            opt: tls.ClientOptions,
+            opt: tls.config.Client,
         ) !void {
             self.* = .{
                 .child = child,
@@ -132,7 +132,7 @@ pub fn Conn(comptime ChildType: type) type {
             io_loop: *io.Loop,
             child: ChildType,
             socket: posix.socket_t,
-            opt: tls.ServerOptions,
+            opt: tls.config.Server,
         ) !void {
             self.* = .{
                 .tcp_conn = io.tcp.Conn(*Self).init(allocator, io_loop, self),

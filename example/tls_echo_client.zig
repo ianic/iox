@@ -17,13 +17,13 @@ pub fn main() !void {
     defer io_loop.deinit();
 
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
-    var root_ca = try io.tls.options.CertBundle.fromFile(allocator, dir, "minica.pem");
+    var root_ca = try io.tls.config.CertBundle.fromFile(allocator, dir, "minica.pem");
     defer root_ca.deinit(allocator);
 
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
 
-    var diagnostic: io.tls.options.Client.Diagnostic = .{};
-    const opt: io.tls.options.Client = .{
+    var diagnostic: io.tls.config.Client.Diagnostic = .{};
+    const opt: io.tls.config.Client = .{
         .host = "localhost",
         .root_ca = root_ca,
         .diagnostic = &diagnostic,
@@ -55,7 +55,7 @@ const Conn = struct {
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         addr: net.Address,
-        opt: io.tls.options.Client,
+        opt: io.tls.config.Client,
     ) !void {
         self.* = .{
             .allocator = allocator,
