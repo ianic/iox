@@ -110,7 +110,7 @@ pub fn Conn(comptime ChildType: type) type {
             try self.send_list.ensureUnusedCapacity(vec.len);
 
             const send_list_len = self.send_list.items.len;
-            for (vec) |buf|
+            for (vec) |buf| if (buf.len > 0)
                 self.send_list.appendAssumeCapacity(.{ .base = buf.ptr, .len = buf.len });
 
             errdefer self.send_list.items.len = send_list_len; // reset send_list
