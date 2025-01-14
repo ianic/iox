@@ -25,6 +25,14 @@ pub const tls = struct {
     pub const Conn = _tls.Conn;
 };
 
+pub const ws = struct {
+    const _ws = @import("ws.zig");
+    const _lib = @import("ws");
+
+    pub const Message = _lib.Message;
+    pub const Client = _ws.Client;
+};
+
 pub const timer = @import("timer.zig");
 
 test {
