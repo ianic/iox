@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         "tls_echo_client",
         "tls_client",
         "ws_client",
+        "ws_autobahn_client",
     };
     inline for (examples) |path| {
         const source_file = "example/" ++ path ++ ".zig";

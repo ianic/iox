@@ -5,7 +5,7 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.tcp);
+const log = std.log.scoped(.main);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
