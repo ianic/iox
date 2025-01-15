@@ -21,9 +21,9 @@ pub fn main() !void {
     const port = 80;
     const addr = try getAddress(allocator, host, port);
 
-    var conn: Conn = undefined;
-    conn.init(allocator, &io_loop, addr, uri);
-    defer conn.deinit();
+    var cli: Client = .{};
+    cli.connect(allocator, &io_loop, addr, uri);
+    defer cli.deinit();
 
     _ = try io_loop.run();
 }
@@ -35,39 +35,40 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
     return list.addrs[0];
 }
 
-const Conn = struct {
+const Client = struct {
     const Self = @This();
 
-    allocator: mem.Allocator,
-    ws_cli: io.ws.Client(*Self),
-    send_len: usize = 1,
+    ws: io.ws.Client(*Self) = undefined,
 
-    pub fn init(
+    fn connect(
         self: *Self,
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         addr: net.Address,
         uri: []const u8,
     ) void {
-        self.* = .{
-            .allocator = allocator,
-            .ws_cli = undefined,
-        };
-        self.ws_cli.init(allocator, io_loop, self, addr, uri);
+        self.ws.connect(allocator, io_loop, self, addr, uri);
     }
 
-    pub fn deinit(self: *Self) void {
-        self.ws_cli.deinit();
+    fn deinit(self: *Self) void {
+        self.ws.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    pub fn onConnect(self: *Self) void {
         log.debug("{*} connected", .{self});
-        try self.ws_cli.send("iso medo u ducan nije reko dobar dan");
+        self.ws.send("iso medo u ducan nije reko dobar dan") catch |err| {
+            log.err("send {}", .{err});
+            self.ws.close();
+        };
     }
 
-    pub fn onMessage(self: *Self, msg: io.ws.Message) !void {
-        _ = self;
-        log.debug("onMessage: {s}", .{msg.payload});
+    pub fn onMessage(self: *Self, msg: io.ws.Message) void {
+        log.debug("{*} message: {s}", .{ self, msg.payload });
+        self.ws.close();
+    }
+
+    pub fn onError(self: *Self, err: anyerror) void {
+        log.err("{*} {}", .{ self, err });
     }
 
     pub fn onClose(self: *Self) void {
@@ -75,3 +76,13 @@ const Conn = struct {
         posix.raise(posix.SIG.USR1) catch {};
     }
 };
+
+fn dhumpStackTrace() void {
+    var address_buffer: [32]usize = undefined;
+    var stack_trace: std.builtin.StackTrace = .{
+        .instruction_addresses = &address_buffer,
+        .index = 0,
+    };
+    std.debug.captureStackTrace(null, &stack_trace);
+    std.debug.dumpStackTrace(stack_trace);
+}

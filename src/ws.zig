@@ -1,32 +1,64 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const net = std.net;
 const mem = std.mem;
-const posix = std.posix;
 const io = @import("root.zig");
 const ws = @import("ws");
 
-pub fn Client(comptime ChildType: type) type {
+pub fn Client(comptime Upstream: type) type {
     return struct {
         const Self = @This();
+        const TcpClient = io.tcp.Client(*Self.TcpDelegate);
+        const WsLib = ws.asyn.Client(Upstream, *TcpClient);
 
-        child: ChildType,
-        tcp_cli: io.tcp.Client(*Self),
-        ws_lib: ws.asyn.Client(*Self),
-        err: ?anyerror = null,
+        const TcpDelegate = struct {
+            parent: *Self,
 
-        pub fn init(
+            pub fn onConnect(self: *TcpDelegate) !void {
+                self.parent.ws_lib.connect() catch |err| {
+                    self.parent.upstream.onError(err);
+                    self.parent.close();
+                };
+            }
+
+            pub fn onRecv(self: *TcpDelegate, bytes: []u8) !usize {
+                return self.parent.ws_lib.recv(bytes) catch |err| {
+                    self.parent.upstream.onError(err);
+                    self.parent.close();
+                    return 0;
+                };
+            }
+
+            pub fn onSend(self: *TcpDelegate, bytes: []const u8) void {
+                self.parent.ws_lib.onSend(bytes);
+            }
+
+            pub fn onError(self: *TcpDelegate, err: anyerror) void {
+                self.parent.upstream.onError(err);
+            }
+
+            pub fn onClose(self: *TcpDelegate) void {
+                self.parent.upstream.onClose();
+            }
+        };
+
+        upstream: Upstream,
+        tcp_cli: TcpClient,
+        tcp_delegate: TcpDelegate,
+        ws_lib: WsLib,
+
+        pub fn connect(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            child: ChildType,
+            upstream: Upstream,
             address: net.Address,
             uri: []const u8,
         ) void {
             self.* = .{
-                .child = child,
-                .tcp_cli = io.tcp.Client(*Self).init(allocator, io_loop, self, address),
-                .ws_lib = ws.asyn.Client(*Self).init(allocator, self, uri),
+                .upstream = upstream,
+                .tcp_cli = TcpClient.init(allocator, io_loop, &self.tcp_delegate, address),
+                .ws_lib = WsLib.init(allocator, upstream, &self.tcp_cli, uri),
+                .tcp_delegate = TcpDelegate{ .parent = self },
             };
             self.tcp_cli.connect();
         }
@@ -36,60 +68,12 @@ pub fn Client(comptime ChildType: type) type {
             self.ws_lib.deinit();
         }
 
-        fn closeErr(self: *Self, err: anyerror) void {
-            if (self.err == null) self.err = err;
-            self.tcp_cli.close();
-        }
-
-        // ----------------- child api
-
         pub fn send(self: *Self, bytes: []const u8) !void {
-            self.ws_lib.send(bytes) catch |err| self.closeErr(err);
+            try self.ws_lib.send(bytes);
         }
 
         pub fn close(self: *Self) void {
             self.tcp_cli.close();
-        }
-
-        // ----------------- tcp callbacks
-
-        pub fn onConnect(self: *Self) !void {
-            self.ws_lib.onConnect() catch |err| self.closeErr(err);
-        }
-
-        pub fn onRecv(self: *Self, bytes: []u8) !usize {
-            return self.ws_lib.onRecv(bytes) catch |err| {
-                self.closeErr(err);
-                return 0;
-            };
-        }
-
-        pub fn onClose(self: *Self) void {
-            self.child.onClose();
-        }
-
-        pub fn onSend(self: *Self, bytes: []const u8) void {
-            self.ws_lib.onSend(bytes);
-        }
-
-        // ----------------- ws lib callbacks
-
-        pub fn onWsHandshake(self: *Self) !void {
-            self.child.onConnect() catch |err| self.closeErr(err);
-        }
-
-        pub fn onWsMessage(self: *Self, msg: ws.Message) !void {
-            try self.child.onMessage(msg);
-        }
-
-        pub fn wsSendZc(self: *Self, bytes: []const u8) !void {
-            try self.tcp_cli.sendZc(bytes);
-        }
-
-        pub fn getError(self: *Self) ?anyerror {
-            if (self.err) |e| return e;
-            if (self.tcp_cli.getError()) |e| return e;
-            return null;
         }
     };
 }
