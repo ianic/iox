@@ -83,11 +83,18 @@ const Conn = struct {
         self.tcp_conn.deinit();
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    pub fn onRecv(self: *Self, bytes: []const u8) usize {
         // log.debug("{*} recv {} bytes", .{ self, bytes.len });
+        self.send(bytes) catch |err| {
+            log.err("send {}", .{err});
+            self.tcp_conn.close();
+        };
+        return bytes.len;
+    }
+
+    fn send(self: *Self, bytes: []const u8) !void {
         const buf = try self.allocator.dupe(u8, bytes);
         try self.tcp_conn.sendZc(buf);
-        return bytes.len;
     }
 
     pub fn onSend(self: *Self, buf: []const u8) void {
@@ -98,6 +105,10 @@ const Conn = struct {
         log.debug("{*} closed", .{self});
         self.deinit();
         self.listener.destroy(self);
+    }
+
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("on error {}", .{err});
     }
 };
 

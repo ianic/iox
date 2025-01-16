@@ -13,14 +13,14 @@ pub fn Client(comptime Upstream: type) type {
         const TcpDelegate = struct {
             parent: *Self,
 
-            pub fn onConnect(self: *TcpDelegate) !void {
+            pub fn onConnect(self: *TcpDelegate) void {
                 self.parent.ws_lib.connect() catch |err| {
                     self.parent.upstream.onError(err);
                     self.parent.close();
                 };
             }
 
-            pub fn onRecv(self: *TcpDelegate, bytes: []u8) !usize {
+            pub fn onRecv(self: *TcpDelegate, bytes: []u8) usize {
                 return self.parent.ws_lib.recv(bytes) catch |err| {
                     if (err != error.EndOfStream) self.parent.upstream.onError(err);
                     self.parent.close();

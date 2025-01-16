@@ -43,14 +43,18 @@ const Conn = struct {
         self.tcp_cli.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
-        try self.send();
+    pub fn onConnect(self: *Self) void {
+        self.send();
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("on error {}", .{err});
+    }
+
+    pub fn onRecv(self: *Self, bytes: []const u8) usize {
         if (bytes.len == self.send_len) {
             for (0..bytes.len) |i| assert(bytes[i] == @as(u8, @intCast(i % 256)));
-            try self.send();
+            self.send();
             log.debug("recv {} bytes done", .{bytes.len});
             return bytes.len;
         }
@@ -58,7 +62,14 @@ const Conn = struct {
         return 0;
     }
 
-    fn send(self: *Self) !void {
+    fn send(self: *Self) void {
+        self.send_() catch |err| {
+            log.err("send failed {}", .{err});
+            self.tcp_cli.close();
+        };
+    }
+
+    fn send_(self: *Self) !void {
         if (self.send_len > 1024 * 1024) {
             self.tcp_cli.close();
             return;
