@@ -22,53 +22,46 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
-    var listener: Listener = undefined;
-    try listener.init(allocator, &io_loop, try listenSocket(addr));
+    var factory: Factory = .{ .allocator = allocator };
+    defer factory.deinit();
+
+    var listener = Listener.init(allocator, &io_loop, &factory);
     defer listener.deinit();
+    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
+    try listener.bind(addr);
 
     _ = try io_loop.run();
 }
 
-const Listener = struct {
+const Listener = io.tcp.Listener(Factory, Conn);
+
+const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    io_loop: *io.Loop,
-    parent: io.tcp.Listener(*Self, Conn),
 
-    pub fn init(
+    fn deinit(_: *Self) void {}
+
+    pub fn onAccept(
         self: *Self,
-        allocator: mem.Allocator,
-        io_loop: *io.Loop,
+        conn: *Conn,
+        tcp_conn: *Listener.Conn,
         socket: posix.socket_t,
-    ) !void {
-        self.* = .{
-            .allocator = allocator,
-            .io_loop = io_loop,
-            .parent = io.tcp.Listener(*Self, Conn).init(allocator, io_loop, socket, self),
-        };
-        self.parent.run();
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.parent.deinit();
-    }
-
-    pub fn onAccept(self: *Self, conn: *Conn, socket: posix.socket_t, addr: net.Address) !void {
+        addr: net.Address,
+    ) void {
         conn.* = .{
             .allocator = self.allocator,
-            .listener = self,
-            .tcp_conn = io.tcp.Conn(*Conn).init(self.allocator, self.io_loop, conn),
+            .tcp_conn = tcp_conn,
         };
-        conn.tcp_conn.onConnect(socket);
         log.debug("{*} connected socket: {}, addr: {}", .{ conn, socket, addr });
     }
 
-    pub fn onClose(_: *Self) void {}
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("listener on error {}", .{err});
+    }
 
-    pub fn destroy(self: *Self, conn: *Conn) void {
-        self.parent.destroy(conn);
+    pub fn onClose(_: *Self) void {
+        log.debug("listener closed ", .{});
     }
 };
 
@@ -76,12 +69,9 @@ const Conn = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    listener: *Listener,
-    tcp_conn: io.tcp.Conn(*Self),
+    tcp_conn: *Listener.Conn,
 
-    pub fn deinit(self: *Self) void {
-        self.tcp_conn.deinit();
-    }
+    pub fn deinit(_: *Self) void {}
 
     pub fn onRecv(self: *Self, bytes: []const u8) usize {
         // log.debug("{*} recv {} bytes", .{ self, bytes.len });
@@ -103,15 +93,9 @@ const Conn = struct {
 
     pub fn onClose(self: *Self) void {
         log.debug("{*} closed", .{self});
-        self.deinit();
-        self.listener.destroy(self);
     }
 
-    pub fn onError(_: *Self, err: anyerror) void {
-        log.err("on error {}", .{err});
+    pub fn onError(self: *Self, err: anyerror) void {
+        log.err("{*} on error {}", .{ self, err });
     }
 };
-
-pub fn listenSocket(addr: net.Address) !posix.socket_t {
-    return (try addr.listen(.{ .reuse_address = true })).stream.handle;
-}

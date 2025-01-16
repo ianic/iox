@@ -17,29 +17,29 @@ pub fn main() !void {
     defer io_loop.deinit();
 
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
-    var conn: Conn = undefined;
-    conn.init(allocator, &io_loop, addr);
-    defer conn.deinit();
+    var cli: Client = undefined;
+    cli.connect(allocator, &io_loop, addr);
+    defer cli.deinit();
 
     _ = try io_loop.run();
 }
 
-const Conn = struct {
+const Client = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    tcp_cli: io.tcp.Client(*Self),
+    tcp_cli: io.tcp.Client(Self),
     send_len: usize = 1,
 
-    pub fn init(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) void {
+    fn connect(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) void {
         self.* = .{
             .allocator = allocator,
-            .tcp_cli = io.tcp.Client(*Self).init(allocator, io_loop, self, addr),
+            .tcp_cli = io.tcp.Client(Self).init(allocator, io_loop, self, addr),
         };
         self.tcp_cli.connect();
     }
 
-    pub fn deinit(self: *Self) void {
+    fn deinit(self: *Self) void {
         self.tcp_cli.deinit();
     }
 

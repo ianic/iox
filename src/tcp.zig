@@ -13,7 +13,7 @@ const log = std.log.scoped(.io_tcp);
 // ref: https://man7.org/linux/man-pages/man2/readv.2.html
 const max_iov = 1024;
 
-/// Upstrea has to implement callback methods
+/// Upstream has to implement callback methods:
 ///
 /// onRecv([]u8) usize      - called with received data,
 ///                           returns number of consumed bytes,
@@ -21,14 +21,17 @@ const max_iov = 1024;
 /// onSend([]const u8)      - after successful send operation with buffer provided to send
 ///                           buffer lifetime has to be until onSend is called
 /// onClose                 - after tcp connection is closed
+/// onError(anyerror)       - for error reporting
+/// onConnect()             - for client to server connections
 ///
-pub fn Conn(comptime Upstream: type) type {
+pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
         io_loop: *io.Loop,
-        upstream: Upstream,
+        upstream: *Upstream,
+        parent: ?*Parent = null,
         socket: posix.socket_t,
         state: State = .closed,
 
@@ -46,7 +49,7 @@ pub fn Conn(comptime Upstream: type) type {
             closing,
         };
 
-        pub fn init(allocator: mem.Allocator, io_loop: *io.Loop, upstream: Upstream) Self {
+        fn init(allocator: mem.Allocator, io_loop: *io.Loop, upstream: *Upstream) Self {
             return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
@@ -58,7 +61,7 @@ pub fn Conn(comptime Upstream: type) type {
             };
         }
 
-        pub fn deinit(self: *Self) void {
+        fn deinit(self: *Self) void {
             self.allocator.free(self.send_iov);
             self.send_list.deinit();
             self.recv_buf.free();
@@ -66,7 +69,7 @@ pub fn Conn(comptime Upstream: type) type {
         }
 
         /// Set connected tcp socket.
-        pub fn onConnect(self: *Self, socket: posix.socket_t) void {
+        fn onConnect(self: *Self, socket: posix.socket_t) void {
             self.socket = socket;
             self.state = .connected;
             // start multishot receive
@@ -227,6 +230,8 @@ pub fn Conn(comptime Upstream: type) type {
             self.state = .closed;
             self.sendCompleted();
             self.upstream.onClose();
+            if (self.parent) |parent|
+                parent.destroy(self);
         }
     };
 }
@@ -234,12 +239,12 @@ pub fn Conn(comptime Upstream: type) type {
 pub fn Client(comptime Upstream: type) type {
     return struct {
         const Self = @This();
+        const Conn = ConnT(Upstream, Self);
 
-        allocator: mem.Allocator,
         io_loop: *io.Loop,
-        upstream: Upstream,
+        upstream: *Upstream,
         address: std.net.Address,
-        conn: Conn(Upstream),
+        conn: Conn,
 
         connect_op: io.Op = .{},
         close_op: io.Op = .{},
@@ -247,15 +252,14 @@ pub fn Client(comptime Upstream: type) type {
         pub fn init(
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            upstream: Upstream,
+            upstream: *Upstream,
             address: net.Address,
         ) Self {
             return .{
-                .allocator = allocator,
                 .io_loop = io_loop,
                 .upstream = upstream,
                 .address = address,
-                .conn = Conn(Upstream).init(allocator, io_loop, upstream),
+                .conn = Conn.init(allocator, io_loop, upstream),
             };
         }
 
@@ -316,6 +320,8 @@ pub fn Client(comptime Upstream: type) type {
 
             self.upstream.onClose();
         }
+
+        fn destroy(_: *Self, _: *Conn) void {}
     };
 }
 
@@ -373,28 +379,20 @@ test "recv_buf remove" {
     try testing.expectEqualStrings("iso medo u ducan", recv_buf.buf);
 }
 
-/// Tcp Listener generic over child listener type and child connection type.
-/// Holds list of all live connections, so we can deinit them when needed.
-/// ChildType need to implement:
-///
-///   onAccept(ChildType, *ConnType, posix.socket_t, net.Address) - called when
-///   new tcp connection is accepted and new ConnType is allocated, child should
-///   finish initialization
-///   Note: child has to call destroy(*ConnType) when it is closed!
-///
-///   onClose() - called when listener closes
-///
-pub fn Listener(comptime ChildType: type, comptime ConnType: type) type {
+/// Factory will be called to finish initialization.
+pub fn Listener(comptime Factory: type, comptime Upstream: type) type {
     return struct {
         const Self = @This();
 
+        pub const Conn = ConnT(Upstream, Self);
+
         allocator: mem.Allocator,
-        socket: posix.socket_t,
+        socket: posix.socket_t = 0,
         io_loop: *io.Loop,
         accept_op: io.Op = .{},
         close_op: io.Op = .{},
-        conns: std.AutoHashMap(*ConnType, void),
-        child: ChildType,
+        conns: std.AutoHashMap(*Conn, *Upstream),
+        factory: *Factory,
         metric: struct {
             // Total number of
             accept: usize = 0, // accepted connections
@@ -404,31 +402,33 @@ pub fn Listener(comptime ChildType: type, comptime ConnType: type) type {
         pub fn init(
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            socket: posix.socket_t,
-            child: ChildType,
+            factory: *Factory,
         ) Self {
             return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
-                .socket = socket,
-                .child = child,
-                .conns = std.AutoHashMap(*ConnType, void).init(allocator),
+                .factory = factory,
+                .conns = std.AutoHashMap(*Conn, *Upstream).init(allocator),
             };
         }
 
         /// Start multishot accept
-        pub fn run(self: *Self) void {
+        pub fn bind(self: *Self, addr: net.Address) !void {
+            self.socket = try listenSocket(addr);
             self.accept_op = io.Op.accept(self.socket, self, onAccept, onAcceptFail);
             self.io_loop.submit(&self.accept_op);
         }
 
         pub fn deinit(self: *Self) void {
             // destroy all connections
-            var iter = self.conns.keyIterator();
-            while (iter.next()) |e| {
-                const conn = e.*;
+            var iter = self.conns.iterator();
+            while (iter.next()) |kv| {
+                const tcp_conn = kv.key_ptr.*;
+                const conn = kv.value_ptr.*;
+                tcp_conn.deinit();
                 conn.deinit();
                 self.allocator.destroy(conn);
+                self.allocator.destroy(tcp_conn);
             }
             self.conns.deinit();
         }
@@ -436,24 +436,34 @@ pub fn Listener(comptime ChildType: type, comptime ConnType: type) type {
         fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
             // Create new collection
             try self.conns.ensureUnusedCapacity(1);
-            const conn = try self.allocator.create(ConnType);
-            errdefer self.allocator.destroy(conn);
+            const upstream = try self.allocator.create(Upstream);
+            errdefer self.allocator.destroy(upstream);
+            const tcp_conn = try self.allocator.create(Conn);
+            errdefer self.allocator.destroy(tcp_conn);
+            tcp_conn.* = Conn.init(self.allocator, self.io_loop, upstream);
+            tcp_conn.parent = self;
+            tcp_conn.onConnect(socket);
             // Pass new connection to the child to finish initialization
-            try self.child.onAccept(conn, socket, addr);
+            self.factory.onAccept(upstream, tcp_conn, socket, addr);
+
             // Add to list of live connections
-            self.conns.putAssumeCapacityNoClobber(conn, {});
+            self.conns.putAssumeCapacityNoClobber(tcp_conn, upstream);
             self.metric.accept +%= 1;
         }
 
         fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
-            log.err("accept failed {}", .{err});
+            self.factory.onError(err);
             self.io_loop.submit(&self.accept_op); // restart operation
         }
 
         /// Destroy closed connection
-        pub fn destroy(self: *Self, conn: *ConnType) void {
-            assert(self.conns.remove(conn));
+        fn destroy(self: *Self, tcp_conn: *Conn) void {
+            const kv = (self.conns.fetchRemove(tcp_conn)) orelse unreachable;
+            const conn = kv.value;
+            tcp_conn.deinit();
+            conn.deinit();
             self.allocator.destroy(conn);
+            self.allocator.destroy(tcp_conn);
             self.metric.close +%= 1;
         }
 
@@ -473,7 +483,11 @@ pub fn Listener(comptime ChildType: type, comptime ConnType: type) type {
                 self.socket = 0;
                 return self.io_loop.submit(&self.close_op);
             }
-            self.child.onClose();
+            self.factory.onClose();
         }
     };
+}
+
+pub fn listenSocket(addr: net.Address) !posix.socket_t {
+    return (try addr.listen(.{ .reuse_address = true })).stream.handle;
 }
