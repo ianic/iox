@@ -77,7 +77,7 @@ const Client = struct {
 
     pub fn onMessage(self: *Self, msg: io.ws.Message) void {
         log.debug("{*} message len: {}", .{ self, msg.payload.len });
-        self.ws.send(msg.payload) catch |err| {
+        self.ws.sendMsg(msg) catch |err| {
             log.err("send {}", .{err});
             self.ws.close();
         };

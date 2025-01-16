@@ -22,7 +22,7 @@ pub fn Client(comptime Upstream: type) type {
 
             pub fn onRecv(self: *TcpDelegate, bytes: []u8) !usize {
                 return self.parent.ws_lib.recv(bytes) catch |err| {
-                    self.parent.upstream.onError(err);
+                    if (err != error.EndOfStream) self.parent.upstream.onError(err);
                     self.parent.close();
                     return 0;
                 };
@@ -70,6 +70,10 @@ pub fn Client(comptime Upstream: type) type {
 
         pub fn send(self: *Self, bytes: []const u8) !void {
             try self.ws_lib.send(bytes);
+        }
+
+        pub fn sendMsg(self: *Self, msg: ws.Message) !void {
+            try self.ws_lib.sendMsg(msg);
         }
 
         pub fn close(self: *Self) void {
