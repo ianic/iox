@@ -24,13 +24,13 @@ const max_iov = 1024;
 /// onError(anyerror)       - for error reporting
 /// onConnect()             - for client to server connections
 ///
-pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
+pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
         io_loop: *io.Loop,
-        upstream: *Upstream,
+        handler: *Handler,
         parent: ?*Parent = null,
         socket: posix.socket_t,
         state: State = .closed,
@@ -49,11 +49,11 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
             closing,
         };
 
-        fn init(allocator: mem.Allocator, io_loop: *io.Loop, upstream: *Upstream) Self {
+        fn init(allocator: mem.Allocator, io_loop: *io.Loop, handler: *Handler) Self {
             return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
-                .upstream = upstream,
+                .handler = handler,
                 .socket = 0,
                 .state = .closed,
                 .send_list = std.ArrayList(posix.iovec_const).init(allocator),
@@ -81,7 +81,7 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
         /// `buf` until `onSend(buf)` is called.
         pub fn sendZc(self: *Self, buf: []const u8) io.Error!void {
             if (self.state == .closed)
-                return self.upstream.onSend(buf);
+                return self.handler.onSend(buf);
 
             if (buf.len == 0)
                 return try self.sendPending();
@@ -106,7 +106,7 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
         ///   sendVZc(&[_][]const u8{buf1, buf2, buf3});
         pub fn sendVZc(self: *Self, vec: []const []const u8) io.Error!void {
             if (self.state == .closed) {
-                for (vec) |buf| self.upstream.onSend(buf);
+                for (vec) |buf| self.handler.onSend(buf);
                 return;
             }
             try self.send_list.ensureUnusedCapacity(vec.len);
@@ -152,16 +152,16 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
         }
 
         /// Send operation is completed, release pending resources and notify
-        /// upstream that we are done with sending their buffers.
+        /// handler that we are done with sending their buffers.
         fn sendCompleted(self: *Self) void {
             const iovlen: u32 = @intCast(self.send_msghdr.iovlen);
             self.send_msghdr.iovlen = 0;
-            // Call upstream callback for each sent buffer
+            // Call handler callback for each sent buffer
             for (self.send_iov[0..iovlen]) |vec| {
                 var buf: []const u8 = undefined;
                 buf.ptr = vec.base;
                 buf.len = vec.len;
-                self.upstream.onSend(buf);
+                self.handler.onSend(buf);
             }
         }
 
@@ -173,7 +173,7 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
         fn onSendFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
                 error.BrokenPipe, error.ConnectionResetByPeer, error.OperationCanceled => {},
-                else => self.upstream.onError(err),
+                else => self.handler.onError(err),
             }
             self.sendCompleted();
             self.close();
@@ -182,12 +182,12 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
             const buf = try self.recv_buf.append(bytes);
             errdefer self.recv_buf.remove(bytes.len) catch |err| {
-                self.upstream.onError(err);
+                self.handler.onError(err);
                 self.close();
             };
-            const n = self.upstream.onRecv(buf);
+            const n = self.handler.onRecv(buf);
             self.recv_buf.set(buf[n..]) catch |err| {
-                self.upstream.onError(err);
+                self.handler.onError(err);
                 self.close();
             };
 
@@ -198,7 +198,7 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
         fn onRecvFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
                 error.EndOfFile, error.ConnectionResetByPeer, error.OperationCanceled => {},
-                else => self.upstream.onError(err),
+                else => self.handler.onError(err),
             }
             self.close();
         }
@@ -229,20 +229,20 @@ pub fn ConnT(comptime Upstream: type, comptime Parent: type) type {
 
             self.state = .closed;
             self.sendCompleted();
-            self.upstream.onClose();
+            self.handler.onClose();
             if (self.parent) |parent|
                 parent.destroy(self);
         }
     };
 }
 
-pub fn Client(comptime Upstream: type) type {
+pub fn Client(comptime Handler: type) type {
     return struct {
         const Self = @This();
-        const Conn = ConnT(Upstream, Self);
+        const Conn = ConnT(Handler, Self);
 
         io_loop: *io.Loop,
-        upstream: *Upstream,
+        handler: *Handler,
         address: std.net.Address,
         conn: Conn,
 
@@ -252,14 +252,14 @@ pub fn Client(comptime Upstream: type) type {
         pub fn init(
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            upstream: *Upstream,
+            handler: *Handler,
             address: net.Address,
         ) Self {
             return .{
                 .io_loop = io_loop,
-                .upstream = upstream,
+                .handler = handler,
                 .address = address,
-                .conn = Conn.init(allocator, io_loop, upstream),
+                .conn = Conn.init(allocator, io_loop, handler),
             };
         }
 
@@ -285,11 +285,11 @@ pub fn Client(comptime Upstream: type) type {
 
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
             self.conn.onConnect(socket);
-            self.upstream.onConnect();
+            self.handler.onConnect();
         }
 
         fn onConnectFail(self: *Self, mybe_err: ?anyerror) void {
-            if (mybe_err) |err| self.upstream.onError(err);
+            if (mybe_err) |err| self.handler.onError(err);
             self.close();
         }
 
@@ -318,7 +318,7 @@ pub fn Client(comptime Upstream: type) type {
                 self.close_op.active())
                 return;
 
-            self.upstream.onClose();
+            self.handler.onClose();
         }
 
         fn destroy(_: *Self, _: *Conn) void {}
@@ -380,18 +380,18 @@ test "recv_buf remove" {
 }
 
 /// Factory will be called to finish initialization.
-pub fn Listener(comptime Factory: type, comptime Upstream: type) type {
+pub fn Listener(comptime Factory: type, comptime Handler: type) type {
     return struct {
         const Self = @This();
 
-        pub const Conn = ConnT(Upstream, Self);
+        pub const Conn = ConnT(Handler, Self);
 
         allocator: mem.Allocator,
         socket: posix.socket_t = 0,
         io_loop: *io.Loop,
         accept_op: io.Op = .{},
         close_op: io.Op = .{},
-        conns: std.AutoHashMap(*Conn, *Upstream),
+        conns: std.AutoHashMap(*Conn, *Handler),
         factory: *Factory,
         metric: struct {
             // Total number of
@@ -408,7 +408,7 @@ pub fn Listener(comptime Factory: type, comptime Upstream: type) type {
                 .allocator = allocator,
                 .io_loop = io_loop,
                 .factory = factory,
-                .conns = std.AutoHashMap(*Conn, *Upstream).init(allocator),
+                .conns = std.AutoHashMap(*Conn, *Handler).init(allocator),
             };
         }
 
@@ -436,18 +436,18 @@ pub fn Listener(comptime Factory: type, comptime Upstream: type) type {
         fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
             // Create new collection
             try self.conns.ensureUnusedCapacity(1);
-            const upstream = try self.allocator.create(Upstream);
-            errdefer self.allocator.destroy(upstream);
+            const handler = try self.allocator.create(Handler);
+            errdefer self.allocator.destroy(handler);
             const tcp_conn = try self.allocator.create(Conn);
             errdefer self.allocator.destroy(tcp_conn);
-            tcp_conn.* = Conn.init(self.allocator, self.io_loop, upstream);
+            tcp_conn.* = Conn.init(self.allocator, self.io_loop, handler);
             tcp_conn.parent = self;
             tcp_conn.onConnect(socket);
             // Pass new connection to the child to finish initialization
-            self.factory.onAccept(upstream, tcp_conn, socket, addr);
+            self.factory.onAccept(handler, tcp_conn, socket, addr);
 
             // Add to list of live connections
-            self.conns.putAssumeCapacityNoClobber(tcp_conn, upstream);
+            self.conns.putAssumeCapacityNoClobber(tcp_conn, handler);
             self.metric.accept +%= 1;
         }
 

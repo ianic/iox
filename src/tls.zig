@@ -7,34 +7,35 @@ const io = @import("root.zig");
 const tls = @import("tls");
 const RecvBuf = @import("tcp.zig").RecvBuf;
 
-pub fn Client(comptime Upstream: type) type {
+pub fn Client(comptime Handler: type) type {
     return struct {
         const Self = @This();
+        const Tcp = io.tcp.Client(Self);
+        const Lib = tls.asyn.Client(Self);
 
-        upstream: *Upstream,
-        tcp_cli: io.tcp.Client(Self),
-        tls_lib: tls.asyn.Client(Self),
+        handler: *Handler,
+        tcp_cli: Tcp,
+        tls_lib: Lib,
         recv_buf: RecvBuf,
 
         pub fn init(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            upstream: *Upstream,
+            handler: *Handler,
             address: net.Address,
-            opt: tls.config.Client,
+            config: tls.config.Client,
         ) !void {
             self.* = .{
-                .upstream = upstream,
-                .tcp_cli = io.tcp.Client(Self).init(allocator, io_loop, self, address),
-                .tls_lib = try tls.asyn.Client(Self).init(allocator, self, opt),
+                .handler = handler,
+                .tcp_cli = Tcp.init(allocator, io_loop, self, address),
+                .tls_lib = try Lib.init(allocator, self, config),
                 .recv_buf = RecvBuf.init(allocator),
             };
-            self.tcp_cli.connect();
         }
 
         pub fn connect(self: *Self) void {
-            _ = self;
+            self.tcp_cli.connect();
         }
 
         pub fn deinit(self: *Self) void {
@@ -44,7 +45,7 @@ pub fn Client(comptime Upstream: type) type {
         }
 
         fn closeErr(self: *Self, err: anyerror) void {
-            self.upstream.onError(err);
+            self.handler.onError(err);
             self.tcp_cli.close();
         }
 
@@ -56,14 +57,12 @@ pub fn Client(comptime Upstream: type) type {
 
         pub fn sendZc(self: *Self, cleartext: []const u8) !void {
             try self.send(cleartext);
-            self.upstream.onSend(cleartext);
+            self.handler.onSend(cleartext);
         }
 
         pub fn close(self: *Self) void {
             self.tcp_cli.close();
         }
-
-        // ----------------- tcp callbacks
 
         /// tcp is connected start tls handshake
         pub fn onConnect(self: *Self) void {
@@ -81,7 +80,7 @@ pub fn Client(comptime Upstream: type) type {
 
         /// tcp connection is closed.
         pub fn onClose(self: *Self) void {
-            self.upstream.onClose();
+            self.handler.onClose();
         }
 
         /// Ciphertext is copied to the kernel tcp buffers.
@@ -94,19 +93,19 @@ pub fn Client(comptime Upstream: type) type {
 
         /// tls handshake finished
         pub fn onHandshake(self: *Self) void {
-            self.upstream.onConnect();
+            self.handler.onConnect();
         }
 
         /// decrypted cleartext received from tcp
         pub fn onRecvCleartext(self: *Self, cleartext: []u8) !void {
             const buf = try self.recv_buf.append(cleartext);
             errdefer self.recv_buf.remove(cleartext.len) catch |err| {
-                self.upstream.onError(err);
+                self.handler.onError(err);
                 self.close();
             };
-            const n = self.upstream.onRecv(buf);
+            const n = self.handler.onRecv(buf);
             self.recv_buf.set(buf[n..]) catch |err| {
-                self.upstream.onError(err);
+                self.handler.onError(err);
                 self.close();
             };
         }
@@ -117,18 +116,18 @@ pub fn Client(comptime Upstream: type) type {
         }
 
         pub fn onError(self: *Self, err: anyerror) void {
-            self.upstream.onError(err);
+            self.handler.onError(err);
         }
     };
 }
 
-pub fn Conn(comptime Upstream: type) type {
+pub fn Conn(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
         const TcpConn = io.tcp.Conn(Self, Self);
 
-        upstream: *Upstream,
+        handler: *Handler,
         tcp_conn: TcpConn,
         tls_lib: tls.asyn.Conn(Self),
         recv_buf: RecvBuf,
@@ -138,13 +137,13 @@ pub fn Conn(comptime Upstream: type) type {
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
-            upstream: *Upstream,
+            handler: *Handler,
             socket: posix.socket_t,
             opt: tls.config.Server,
         ) !void {
             self.* = .{
                 .tcp_conn = TcpConn.init(allocator, io_loop, self),
-                .upstream = upstream,
+                .handler = handler,
                 .tls_lib = try tls.asyn.Conn(Self).init(allocator, self, opt),
                 .recv_buf = RecvBuf.init(allocator),
             };
@@ -158,7 +157,7 @@ pub fn Conn(comptime Upstream: type) type {
         }
 
         fn closeErr(self: *Self, err: anyerror) void {
-            self.upstream.onError(err);
+            self.handler.onError(err);
             self.tcp_conn.close();
         }
 
@@ -185,7 +184,7 @@ pub fn Conn(comptime Upstream: type) type {
 
         /// Tcp connection is closed.
         pub fn onClose(self: *Self) void {
-            self.upstream.onClose();
+            self.handler.onClose();
         }
 
         /// Ciphertext is copied to the kernel tcp buffers.
@@ -198,7 +197,7 @@ pub fn Conn(comptime Upstream: type) type {
 
         /// tls handshake finished
         pub fn onHandshake(self: *Self) void {
-            self.upstream.onConnect() catch |err| self.closeErr(err);
+            self.handler.onConnect() catch |err| self.closeErr(err);
         }
 
         /// decrypted cleartext received from tcp
@@ -208,7 +207,7 @@ pub fn Conn(comptime Upstream: type) type {
                 if (self.err == null) self.err = err;
                 self.close();
             };
-            const n = try self.upstream.onRecv(buf);
+            const n = try self.handler.onRecv(buf);
             self.recv_buf.set(buf[n..]) catch |err| {
                 if (self.err == null) self.err = err;
                 self.close();

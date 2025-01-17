@@ -20,7 +20,7 @@ pub fn main() !void {
     var config = try io.ws.Config.fromUri(allocator, uri);
     defer config.deinit(allocator);
 
-    var handler: Handler = .{};
+    var handler: Handler = undefined;
     try handler.ws.connect(allocator, &io_loop, &handler, config);
     defer handler.deinit();
 
@@ -29,9 +29,8 @@ pub fn main() !void {
 
 const Handler = struct {
     const Self = @This();
-    const Ws = io.ws.Client(Self);
 
-    ws: Ws = undefined,
+    ws: io.ws.Client(Self),
 
     fn deinit(self: *Self) void {
         self.ws.deinit();
@@ -39,14 +38,14 @@ const Handler = struct {
 
     pub fn onConnect(self: *Self) void {
         log.debug("{*} connected", .{self});
-        self.ws.send("iso medo u ducan nije reko dobar dan") catch |err| {
+        self.ws.send(.{ .data = "iso medo u ducan nije reko dobar dan" }) catch |err| {
             log.err("send {}", .{err});
             self.ws.close();
         };
     }
 
-    pub fn onMessage(self: *Self, msg: io.ws.Message) void {
-        log.debug("{*} message: {s}", .{ self, msg.payload });
+    pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
+        log.debug("{*} message: {s}", .{ self, msg.data });
         self.ws.close();
     }
 
