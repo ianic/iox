@@ -8,10 +8,11 @@ pub fn Client(comptime Upstream: type) type {
     return struct {
         const Self = @This();
 
-        pub const Tcp = io.tcp.Client(Delegate);
-        pub const Tls = io.tls.Client(Delegate);
-        pub const WsLib = ws.asyn.Client(Upstream, Downstream);
+        const Tcp = io.tcp.Client(Delegate);
+        const Tls = io.tls.Client(Delegate);
+        const Lib = ws.asyn.Client(Upstream, Downstream);
 
+        // Downstream transport protocol interface
         const Downstream = union(enum) {
             tcp: *Tcp,
             tls: *Tls,
@@ -43,26 +44,29 @@ pub fn Client(comptime Upstream: type) type {
             }
         };
 
+        // Methods exposed to the downstream transport protocol.
+        // Hides these from public interface exposed upstream.
         const Delegate = struct {
             parent: *Self,
 
             pub fn onConnect(self: *Delegate) void {
-                self.parent.ws_lib.connect() catch |err| {
+                self.parent.lib.connect() catch |err| {
                     self.parent.upstream.onError(err);
                     self.parent.close();
                 };
             }
 
             pub fn onRecv(self: *Delegate, bytes: []u8) usize {
-                return self.parent.ws_lib.recv(bytes) catch |err| {
-                    if (err != error.EndOfStream) self.parent.upstream.onError(err);
+                return self.parent.lib.recv(bytes) catch |err| {
+                    if (err != error.EndOfStream)
+                        self.parent.upstream.onError(err);
                     self.parent.close();
                     return bytes.len;
                 };
             }
 
             pub fn onSend(self: *Delegate, bytes: []const u8) void {
-                self.parent.ws_lib.onSend(bytes);
+                self.parent.lib.onSend(bytes);
             }
 
             pub fn onError(self: *Delegate, err: anyerror) void {
@@ -77,8 +81,8 @@ pub fn Client(comptime Upstream: type) type {
         allocator: mem.Allocator,
         upstream: *Upstream,
         downstream: Downstream,
-        tcp_delegate: Delegate,
-        ws_lib: WsLib,
+        delegate: Delegate,
+        lib: Lib,
 
         pub fn connect(
             self: *Self,
@@ -86,30 +90,26 @@ pub fn Client(comptime Upstream: type) type {
             io_loop: *io.Loop,
             upstream: *Upstream,
             config: Config,
-            // address: net.Address,
-            // uri: []const u8,
-            // opt: io.tls.config.Client,
         ) !void {
             self.* = .{
                 .allocator = allocator,
                 .upstream = upstream,
-                .ws_lib = WsLib.init(allocator, upstream, &self.downstream, config.uri),
-                .tcp_delegate = Delegate{ .parent = self },
-                .downstream = undefined,
-            };
-            self.downstream = switch (config.scheme) {
-                .wss => brk: {
-                    const tls_cli = try allocator.create(Tls);
-                    try tls_cli.init(allocator, io_loop, &self.tcp_delegate, config.addr, .{
-                        .host = config.host,
-                        .root_ca = config.root_ca.?,
-                    });
-                    break :brk .{ .tls = tls_cli };
-                },
-                .ws => brk: {
-                    const tcp_cli = try allocator.create(Tcp);
-                    tcp_cli.* = Tcp.init(allocator, io_loop, &self.tcp_delegate, config.addr);
-                    break :brk .{ .tcp = tcp_cli };
+                .lib = Lib.init(allocator, upstream, &self.downstream, config.uri),
+                .delegate = .{ .parent = self },
+                .downstream = switch (config.scheme) {
+                    .wss => brk: {
+                        const tls_cli = try allocator.create(Tls);
+                        try tls_cli.init(allocator, io_loop, &self.delegate, config.addr, .{
+                            .host = config.host,
+                            .root_ca = config.root_ca.?,
+                        });
+                        break :brk .{ .tls = tls_cli };
+                    },
+                    .ws => brk: {
+                        const tcp_cli = try allocator.create(Tcp);
+                        tcp_cli.* = Tcp.init(allocator, io_loop, &self.delegate, config.addr);
+                        break :brk .{ .tcp = tcp_cli };
+                    },
                 },
             };
             self.downstream.connect();
@@ -118,15 +118,15 @@ pub fn Client(comptime Upstream: type) type {
         pub fn deinit(self: *Self) void {
             self.downstream.deinit();
             self.downstream.destroy(self.allocator);
-            self.ws_lib.deinit();
+            self.lib.deinit();
         }
 
         pub fn send(self: *Self, bytes: []const u8) !void {
-            try self.ws_lib.send(bytes);
+            try self.lib.send(bytes);
         }
 
         pub fn sendMsg(self: *Self, msg: ws.Message) !void {
-            try self.ws_lib.sendMsg(msg);
+            try self.lib.sendMsg(msg);
         }
 
         pub fn close(self: *Self) void {
@@ -144,7 +144,12 @@ test "sizes" {
         pub fn onClose(_: *Self) void {}
     };
 
-    std.debug.print("size of: {}\n", .{@sizeOf(Client(T))});
+    std.debug.print("size of Client(T): {}\n", .{@sizeOf(Client(T))});
+    std.debug.print("size of WsLib: {}\n", .{@sizeOf(Client(T).Lib)});
+    std.debug.print("size of Tcp: {}\n", .{@sizeOf(Client(T).Tcp)});
+    std.debug.print("size of Tls: {}\n", .{@sizeOf(Client(T).Tls)});
+    std.debug.print("size of Config: {}\n", .{@sizeOf(Config)});
+    std.debug.print("size of Downstream: {}\n", .{@sizeOf(Client(T).Downstream)});
 }
 
 const testing = std.testing;

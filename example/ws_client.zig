@@ -20,47 +20,18 @@ pub fn main() !void {
     var config = try io.ws.Config.fromUri(allocator, uri);
     defer config.deinit(allocator);
 
-    // const host = "ws.vi-server.org";
-    // const port = 443;
-    // const addr = try getAddress(allocator, host, port);
-
-    // var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
-    // defer root_ca.deinit(allocator);
-    // const opt: io.tls.config.Client = .{
-    //     .host = host,
-    //     .root_ca = root_ca,
-    // };
-
-    var cli: Client = .{};
-    try cli.connect(allocator, &io_loop, config);
-    defer cli.deinit();
+    var handler: Handler = .{};
+    try handler.ws.connect(allocator, &io_loop, &handler, config);
+    defer handler.deinit();
 
     _ = try io_loop.run();
 }
 
-fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Address {
-    const list = try std.net.getAddressList(allocator, host, port);
-    defer list.deinit();
-    if (list.addrs.len == 0) return error.UnknownHostName;
-    return list.addrs[0];
-}
-
-const Client = struct {
+const Handler = struct {
     const Self = @This();
+    const Ws = io.ws.Client(Self);
 
-    ws: io.ws.Client(Self) = undefined,
-
-    fn connect(
-        self: *Self,
-        allocator: mem.Allocator,
-        io_loop: *io.Loop,
-        config: io.ws.Config,
-        // addr: net.Address,
-        // uri: []const u8,
-        // opt: io.tls.config.Client,
-    ) !void {
-        try self.ws.connect(allocator, io_loop, self, config);
-    }
+    ws: Ws = undefined,
 
     fn deinit(self: *Self) void {
         self.ws.deinit();
