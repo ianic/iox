@@ -16,7 +16,7 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    const uri = "ws://ws.vi-server.org/mirror/";
+    const uri = "wss://ws.vi-server.org/mirror/";
     var config = try io.ws.Config.fromUri(allocator, uri);
     defer config.deinit(allocator);
 

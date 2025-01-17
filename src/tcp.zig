@@ -181,10 +181,6 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
 
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
             const buf = try self.recv_buf.append(bytes);
-            errdefer self.recv_buf.remove(bytes.len) catch |err| {
-                self.handler.onError(err);
-                self.close();
-            };
             const n = self.handler.onRecv(buf);
             self.recv_buf.set(buf[n..]) catch |err| {
                 self.handler.onError(err);

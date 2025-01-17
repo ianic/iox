@@ -29,7 +29,7 @@ pub const ws = struct {
     const _ws = @import("ws.zig");
     const _lib = @import("ws");
 
-    pub const Message = _lib.Message;
+    pub const Msg = _lib.Msg;
     pub const Client = _ws.Client;
     pub const Config = _ws.Config;
 };

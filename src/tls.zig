@@ -10,13 +10,68 @@ const RecvBuf = @import("tcp.zig").RecvBuf;
 pub fn Client(comptime Handler: type) type {
     return struct {
         const Self = @This();
-        const Tcp = io.tcp.Client(Self);
-        const Lib = tls.asyn.Client(Self);
+        const Tcp = io.tcp.Client(TcpFacade);
+        const Lib = tls.asyn.Client(LibFacade);
+
+        const TcpFacade = struct {
+            parent: *Self,
+
+            // tcp is connected start tls handshake
+            pub fn onConnect(self: *TcpFacade) void {
+                self.parent.lib.connect() catch |err| self.parent.closeErr(err);
+            }
+
+            // Ciphertext bytes received from tcp, pass it to tls lib
+            pub fn onRecv(self: *TcpFacade, ciphertext: []u8) usize {
+                return self.parent.lib.recv(ciphertext) catch |err| {
+                    self.parent.closeErr(err);
+                    return 0;
+                };
+            }
+
+            // tcp connection is closed.
+            pub fn onClose(self: *TcpFacade) void {
+                self.parent.handler.onClose();
+            }
+
+            // Ciphertext is copied to the kernel tcp buffers.
+            // Safe to release it now.
+            pub fn onSend(self: *TcpFacade, ciphertext: []const u8) void {
+                self.parent.lib.onSend(ciphertext);
+            }
+
+            pub fn onError(self: *TcpFacade, err: anyerror) void {
+                self.parent.handler.onError(err);
+            }
+        };
+
+        const LibFacade = struct {
+            parent: *Self,
+            recv_buf: RecvBuf,
+
+            // tls handshake finished
+            pub fn onConnect(self: *LibFacade) void {
+                self.parent.handler.onConnect();
+            }
+
+            // decrypted cleartext from tls lib
+            pub fn onRecv(self: *LibFacade, cleartext: []u8) void {
+                const buf = self.recv_buf.append(cleartext) catch |err| return self.parent.closeErr(err);
+                const n = self.parent.handler.onRecv(buf);
+                self.recv_buf.set(buf[n..]) catch |err| self.parent.closeErr(err);
+            }
+
+            // tls lib sends ciphertext
+            pub fn sendZc(self: *LibFacade, ciphertext: []const u8) !void {
+                try self.parent.tcp.sendZc(ciphertext);
+            }
+        };
 
         handler: *Handler,
-        tcp_cli: Tcp,
-        tls_lib: Lib,
-        recv_buf: RecvBuf,
+        tcp: Tcp,
+        lib: Lib,
+        tcp_facade: TcpFacade,
+        lib_facade: LibFacade,
 
         pub fn init(
             self: *Self,
@@ -28,31 +83,30 @@ pub fn Client(comptime Handler: type) type {
         ) !void {
             self.* = .{
                 .handler = handler,
-                .tcp_cli = Tcp.init(allocator, io_loop, self, address),
-                .tls_lib = try Lib.init(allocator, self, config),
-                .recv_buf = RecvBuf.init(allocator),
+                .tcp_facade = .{ .parent = self },
+                .lib_facade = .{ .parent = self, .recv_buf = RecvBuf.init(allocator) },
+                .tcp = Tcp.init(allocator, io_loop, &self.tcp_facade, address),
+                .lib = try Lib.init(allocator, &self.lib_facade, config),
             };
         }
 
         pub fn connect(self: *Self) void {
-            self.tcp_cli.connect();
+            self.tcp.connect();
         }
 
         pub fn deinit(self: *Self) void {
-            self.tcp_cli.deinit();
-            self.tls_lib.deinit();
-            self.recv_buf.free();
+            self.lib_facade.recv_buf.free();
+            self.tcp.deinit();
+            self.lib.deinit();
         }
 
         fn closeErr(self: *Self, err: anyerror) void {
             self.handler.onError(err);
-            self.tcp_cli.close();
+            self.tcp.close();
         }
 
-        // ----------------- child api
-
         pub fn send(self: *Self, cleartext: []const u8) !void {
-            self.tls_lib.send(cleartext) catch |err| self.closeErr(err);
+            try self.lib.send(cleartext);
         }
 
         pub fn sendZc(self: *Self, cleartext: []const u8) !void {
@@ -61,62 +115,7 @@ pub fn Client(comptime Handler: type) type {
         }
 
         pub fn close(self: *Self) void {
-            self.tcp_cli.close();
-        }
-
-        /// tcp is connected start tls handshake
-        pub fn onConnect(self: *Self) void {
-            self.tls_lib.onConnect() catch |err| self.closeErr(err);
-        }
-
-        /// Ciphertext bytes received from tcp, pass it to tls.
-        /// Tls will decrypt it and call onRecvCleartext.
-        pub fn onRecv(self: *Self, ciphertext: []u8) usize {
-            return self.tls_lib.onRecv(ciphertext) catch |err| {
-                self.closeErr(err);
-                return 0;
-            };
-        }
-
-        /// tcp connection is closed.
-        pub fn onClose(self: *Self) void {
-            self.handler.onClose();
-        }
-
-        /// Ciphertext is copied to the kernel tcp buffers.
-        /// Safe to release it now.
-        pub fn onSend(self: *Self, ciphertext: []const u8) void {
-            self.tls_lib.onSend(ciphertext);
-        }
-
-        // ----------------- tls lib callbacks
-
-        /// tls handshake finished
-        pub fn onHandshake(self: *Self) void {
-            self.handler.onConnect();
-        }
-
-        /// decrypted cleartext received from tcp
-        pub fn onRecvCleartext(self: *Self, cleartext: []u8) !void {
-            const buf = try self.recv_buf.append(cleartext);
-            errdefer self.recv_buf.remove(cleartext.len) catch |err| {
-                self.handler.onError(err);
-                self.close();
-            };
-            const n = self.handler.onRecv(buf);
-            self.recv_buf.set(buf[n..]) catch |err| {
-                self.handler.onError(err);
-                self.close();
-            };
-        }
-
-        /// tls sends ciphertext to tcp
-        pub fn sendCiphertext(self: *Self, ciphertext: []const u8) !void {
-            try self.tcp_cli.sendZc(ciphertext);
-        }
-
-        pub fn onError(self: *Self, err: anyerror) void {
-            self.handler.onError(err);
+            self.tcp.close();
         }
     };
 }
