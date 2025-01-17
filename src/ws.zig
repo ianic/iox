@@ -106,17 +106,21 @@ pub fn Client(comptime Handler: type) type {
             }
         };
 
+        // Methods exposed to websocket library
         const LibFacade = struct {
             parent: *Self,
 
+            // Event fired when websocket handshake is finished
             pub fn onConnect(self: *LibFacade) void {
                 self.parent.handler.onConnect();
             }
 
+            // Event fired when message is received
             pub fn onRecv(self: *LibFacade, msg: io.ws.Msg) void {
                 self.parent.handler.onRecv(msg);
             }
 
+            // Method called when there is something to send downstream
             pub fn sendZc(self: *LibFacade, bytes: []const u8) !void {
                 try self.parent.transport.sendZc(bytes);
             }
