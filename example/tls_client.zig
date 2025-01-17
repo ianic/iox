@@ -45,10 +45,6 @@ pub fn main() !void {
 
     _ = try io_loop.run();
 
-    if (https.tls_cli.getError()) |err| {
-        log.err("https {}", .{err});
-        return;
-    }
     showDiagnostic(&diagnostic, host_arg);
 }
 
@@ -57,7 +53,7 @@ const Https = struct {
 
     allocator: mem.Allocator,
     host: []const u8,
-    tls_cli: io.tls.Client(*Self),
+    tls_cli: io.tls.Client(Self),
 
     fn init(
         self: *Self,
@@ -78,12 +74,19 @@ const Https = struct {
         self.tls_cli.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    pub fn onConnect(self: *Self) void {
+        self.get() catch |err| {
+            self.onError(err);
+            self.tls_cli.close();
+        };
+    }
+
+    fn get(self: *Self) !void {
         const request = try std.fmt.allocPrint(self.allocator, "GET / HTTP/1.1\r\nHost: {s}\r\n\r\n", .{self.host});
         try self.tls_cli.send(request);
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    pub fn onRecv(self: *Self, bytes: []const u8) usize {
         //log.debug("recv {} bytes: {s}", .{ bytes.len, bytes }); //bytes[0..@min(128, bytes.len)] });
         std.debug.print("{s}", .{bytes});
 
@@ -100,6 +103,10 @@ const Https = struct {
         //log.debug("onClose", .{});
         _ = self;
         posix.raise(posix.SIG.USR1) catch {};
+    }
+
+    pub fn onError(self: *Self, err: anyerror) void {
+        log.err("{*} {}", .{ self, err });
     }
 };
 

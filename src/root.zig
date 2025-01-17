@@ -7,7 +7,7 @@ pub const Options = io.Options;
 
 pub const tcp = struct {
     const _tcp = @import("tcp.zig");
-    pub const Conn = _tcp.Conn;
+    pub const Conn = _tcp.ConnT;
     pub const Listener = _tcp.Listener;
     pub const Client = _tcp.Client;
 };
@@ -31,6 +31,7 @@ pub const ws = struct {
 
     pub const Message = _lib.Message;
     pub const Client = _ws.Client;
+    pub const Config = _ws.Config;
 };
 
 pub const timer = @import("timer.zig");
@@ -42,4 +43,5 @@ test {
     _ = @import("fifo.zig");
     _ = @import("errno.zig");
     _ = @import("timer.zig");
+    _ = @import("ws.zig");
 }

@@ -16,13 +16,23 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    const host = "ws.vi-server.org";
     const uri = "ws://ws.vi-server.org/mirror/";
-    const port = 80;
-    const addr = try getAddress(allocator, host, port);
+    var config = try io.ws.Config.fromUri(allocator, uri);
+    defer config.deinit(allocator);
+
+    // const host = "ws.vi-server.org";
+    // const port = 443;
+    // const addr = try getAddress(allocator, host, port);
+
+    // var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
+    // defer root_ca.deinit(allocator);
+    // const opt: io.tls.config.Client = .{
+    //     .host = host,
+    //     .root_ca = root_ca,
+    // };
 
     var cli: Client = .{};
-    cli.connect(allocator, &io_loop, addr, uri);
+    try cli.connect(allocator, &io_loop, config);
     defer cli.deinit();
 
     _ = try io_loop.run();
@@ -38,16 +48,18 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
 const Client = struct {
     const Self = @This();
 
-    ws: io.ws.Client(*Self) = undefined,
+    ws: io.ws.Client(Self) = undefined,
 
     fn connect(
         self: *Self,
         allocator: mem.Allocator,
         io_loop: *io.Loop,
-        addr: net.Address,
-        uri: []const u8,
-    ) void {
-        self.ws.connect(allocator, io_loop, self, addr, uri);
+        config: io.ws.Config,
+        // addr: net.Address,
+        // uri: []const u8,
+        // opt: io.tls.config.Client,
+    ) !void {
+        try self.ws.connect(allocator, io_loop, self, config);
     }
 
     fn deinit(self: *Self) void {
@@ -86,3 +98,5 @@ fn dhumpStackTrace() void {
     std.debug.captureStackTrace(null, &stack_trace);
     std.debug.dumpStackTrace(stack_trace);
 }
+
+const testing = std.testing;
