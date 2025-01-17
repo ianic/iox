@@ -6,6 +6,7 @@ const posix = std.posix;
 const assert = std.debug.assert;
 
 const log = std.log.scoped(.main);
+pub const std_options = std.Options{ .log_level = .debug };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,31 +17,27 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
-    var cli: Client = undefined;
-    cli.connect(allocator, &io_loop, addr);
-    defer cli.deinit();
+    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
+    var handler: Handler = .{
+        .allocator = allocator,
+        .tcp = undefined,
+    };
+    handler.tcp = io.tcp.Client(Handler).init(allocator, &io_loop, &handler, addr);
+    handler.tcp.connect();
+    defer handler.deinit();
 
     _ = try io_loop.run();
 }
 
-const Client = struct {
+const Handler = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    tcp_cli: io.tcp.Client(Self),
+    tcp: io.tcp.Client(Self),
     send_len: usize = 1,
 
-    fn connect(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) void {
-        self.* = .{
-            .allocator = allocator,
-            .tcp_cli = io.tcp.Client(Self).init(allocator, io_loop, self, addr),
-        };
-        self.tcp_cli.connect();
-    }
-
     fn deinit(self: *Self) void {
-        self.tcp_cli.deinit();
+        self.tcp.deinit();
     }
 
     pub fn onConnect(self: *Self) void {
@@ -58,29 +55,30 @@ const Client = struct {
             log.debug("recv {} bytes done", .{bytes.len});
             return bytes.len;
         }
-        log.debug("recv {} bytes waiting for more", .{bytes.len});
+        // log.debug("recv {} bytes waiting for more", .{bytes.len});
         return 0;
     }
 
     fn send(self: *Self) void {
         self.send_() catch |err| {
             log.err("send failed {}", .{err});
-            self.tcp_cli.close();
+            self.tcp.close();
         };
     }
 
     fn send_(self: *Self) !void {
-        if (self.send_len > 1024 * 1024) {
-            self.tcp_cli.close();
+        if (self.send_len > 1024 * 1024 * 1024) {
+            self.tcp.close();
             return;
         }
 
         self.send_len *= 2;
         const buf = try self.allocator.alloc(u8, self.send_len);
+        errdefer self.allocator.free(buf);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
-        log.debug("sending {} bytes", .{buf.len});
+        // log.debug("sending {} bytes", .{buf.len});
 
-        try self.tcp_cli.sendZc(buf);
+        try self.tcp.sendZc(buf);
         // example of sendVZc
         // try self.tcp_cli.sendVZc(&[_][]const u8{buf});
 
