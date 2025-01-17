@@ -21,10 +21,10 @@ test {
         defer ws_cli.deinit();
     }
     { // note about type sizes
-        try testing.expectEqual(216, @sizeOf(Client(Handler)));
-        try testing.expectEqual(168, @sizeOf(Client(Handler).Lib));
+        try testing.expectEqual(208, @sizeOf(Client(Handler)));
+        try testing.expectEqual(152, @sizeOf(Client(Handler).Lib));
         try testing.expectEqual(640, @sizeOf(Client(Handler).Tcp));
-        try testing.expectEqual(928, @sizeOf(Client(Handler).Tls));
+        try testing.expectEqual(944, @sizeOf(Client(Handler).Tls));
         try testing.expectEqual(208, @sizeOf(Config));
         try testing.expectEqual(16, @sizeOf(Client(Handler).Transport));
     }
