@@ -36,9 +36,9 @@ pub fn Client(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
-        const Tcp = io.tcp.Client(Facade);
-        const Tls = io.tls.Client(Facade);
-        const Lib = ws.asyn.Client(Handler, Transport);
+        const Tcp = io.tcp.Client(TransportFacade);
+        const Tls = io.tls.Client(TransportFacade);
+        const Lib = ws.asyn.Client(LibFacade);
 
         // Downstream transport protocol interface
         const Transport = union(enum) {
@@ -74,17 +74,17 @@ pub fn Client(comptime Handler: type) type {
 
         // Methods exposed to the downstream transport protocol.
         // Hides these from public (handler's) interface.
-        const Facade = struct {
+        const TransportFacade = struct {
             parent: *Self,
 
-            pub fn onConnect(self: *Facade) void {
+            pub fn onConnect(self: *TransportFacade) void {
                 self.parent.lib.connect() catch |err| {
                     self.parent.handler.onError(err);
                     self.parent.close();
                 };
             }
 
-            pub fn onRecv(self: *Facade, bytes: []u8) usize {
+            pub fn onRecv(self: *TransportFacade, bytes: []u8) usize {
                 return self.parent.lib.recv(bytes) catch |err| {
                     if (err != error.EndOfStream)
                         self.parent.handler.onError(err);
@@ -93,23 +93,40 @@ pub fn Client(comptime Handler: type) type {
                 };
             }
 
-            pub fn onSend(self: *Facade, bytes: []const u8) void {
+            pub fn onSend(self: *TransportFacade, bytes: []const u8) void {
                 self.parent.lib.onSend(bytes);
             }
 
-            pub fn onError(self: *Facade, err: anyerror) void {
+            pub fn onError(self: *TransportFacade, err: anyerror) void {
                 self.parent.handler.onError(err);
             }
 
-            pub fn onClose(self: *Facade) void {
+            pub fn onClose(self: *TransportFacade) void {
                 self.parent.handler.onClose();
+            }
+        };
+
+        const LibFacade = struct {
+            parent: *Self,
+
+            pub fn onConnect(self: *LibFacade) void {
+                self.parent.handler.onConnect();
+            }
+
+            pub fn onRecv(self: *LibFacade, msg: io.ws.Msg) void {
+                self.parent.handler.onRecv(msg);
+            }
+
+            pub fn sendZc(self: *LibFacade, bytes: []const u8) !void {
+                try self.parent.transport.sendZc(bytes);
             }
         };
 
         allocator: mem.Allocator,
         handler: *Handler,
+        transport_facade: TransportFacade,
+        lib_facade: LibFacade,
         transport: Transport,
-        facade: Facade,
         lib: Lib,
 
         fn init(
@@ -122,12 +139,13 @@ pub fn Client(comptime Handler: type) type {
             self.* = .{
                 .allocator = allocator,
                 .handler = handler,
-                .lib = Lib.init(allocator, handler, &self.transport, config.uri),
-                .facade = .{ .parent = self },
+                .lib_facade = .{ .parent = self },
+                .transport_facade = .{ .parent = self },
+                .lib = Lib.init(allocator, &self.lib_facade, config.uri),
                 .transport = switch (config.scheme) {
                     .wss => brk: {
                         const tls_cli = try allocator.create(Tls);
-                        try tls_cli.init(allocator, io_loop, &self.facade, config.addr, .{
+                        try tls_cli.init(allocator, io_loop, &self.transport_facade, config.addr, .{
                             .host = config.host,
                             .root_ca = config.root_ca.?,
                         });
@@ -135,7 +153,7 @@ pub fn Client(comptime Handler: type) type {
                     },
                     .ws => brk: {
                         const tcp_cli = try allocator.create(Tcp);
-                        tcp_cli.* = Tcp.init(allocator, io_loop, &self.facade, config.addr);
+                        tcp_cli.* = Tcp.init(allocator, io_loop, &self.transport_facade, config.addr);
                         break :brk .{ .tcp = tcp_cli };
                     },
                 },
