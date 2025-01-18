@@ -431,3 +431,65 @@ pub fn Listener(comptime Factory: type) type {
         }
     };
 }
+
+pub fn Connector(comptime Factory: type) type {
+    return struct {
+        const Self = @This();
+
+        address: std.net.Address,
+        io_loop: *io.Loop,
+        connect_op: io.Op = .{},
+        close_op: io.Op = .{},
+        factory: *Factory,
+
+        pub fn init(
+            io_loop: *io.Loop,
+            factory: *Factory,
+            address: net.Address,
+        ) Self {
+            return .{
+                .io_loop = io_loop,
+                .factory = factory,
+                .address = address,
+            };
+        }
+
+        pub fn connect(self: *Self) void {
+            assert(!self.connect_op.active() and !self.close_op.active());
+
+            self.connect_op = io.Op.connect(
+                .{ .addr = &self.address },
+                self,
+                onConnect,
+                onConnectFail,
+            );
+            self.io_loop.submit(&self.connect_op);
+        }
+
+        fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
+            try self.factory.connect(socket, self.address);
+        }
+
+        fn onConnectFail(self: *Self, err: ?anyerror) void {
+            if (err) |e| self.factory.onError(e);
+            self.close();
+        }
+
+        fn onCancel(self: *Self, _: ?anyerror) void {
+            self.close();
+        }
+
+        pub fn close(self: *Self) void {
+            if (self.connect_op.active() and !self.close_op.active()) {
+                self.close_op = io.Op.cancel(&self.connect_op, self, onCancel);
+                return self.io_loop.submit(&self.close_op);
+            }
+
+            if (self.connect_op.active() or
+                self.close_op.active())
+                return;
+
+            self.factory.onClose();
+        }
+    };
+}

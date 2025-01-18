@@ -17,31 +17,65 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
-    var handler: Handler = .{
+    var factory: Factory = .{
         .allocator = allocator,
-        .tcp = undefined,
+        .io_loop = &io_loop,
     };
-    handler.tcp = io.tcp.Client(Handler).init(allocator, &io_loop, &handler, addr);
-    handler.tcp.connect();
-    defer handler.deinit();
+    defer factory.deinit();
+
+    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
+    var connector = io.tcp.Connector(Factory).init(&io_loop, &factory, addr);
+    connector.connect();
 
     _ = try io_loop.run();
 }
 
-const Handler = struct {
+const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    tcp: io.tcp.Client(Self),
+    io_loop: *io.Loop,
+    handler: ?*Handler = null,
+
+    fn deinit(self: *Self) void {
+        if (self.handler) |handler| {
+            handler.deinit();
+            self.allocator.destroy(handler);
+        }
+    }
+
+    pub fn connect(self: *Self, socket: posix.socket_t, addr: net.Address) !void {
+        const handler = try self.allocator.create(Handler);
+        handler.* = .{
+            .allocator = self.allocator,
+            .tcp = Handler.Tcp.init(self.allocator, self.io_loop, handler),
+        };
+        handler.tcp.connect(socket);
+        handler.send();
+        self.handler = handler;
+        log.debug("{*} connected socket: {} addr: {}", .{ &self.handler, socket, addr });
+    }
+
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("connect error {}", .{err});
+    }
+
+    pub fn onClose(_: *Self) void {
+        log.debug("connector closed ", .{});
+        posix.raise(posix.SIG.USR1) catch {};
+    }
+};
+
+const Handler = struct {
+    const Self = @This();
+    const Tcp = io.tcp.Conn(Self);
+
+    allocator: mem.Allocator,
+    tcp: Tcp,
     send_len: usize = 1,
 
     fn deinit(self: *Self) void {
         self.tcp.deinit();
-    }
-
-    pub fn onConnect(self: *Self) void {
-        self.send();
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
