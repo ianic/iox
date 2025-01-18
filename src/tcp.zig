@@ -13,25 +13,13 @@ const log = std.log.scoped(.io_tcp);
 // ref: https://man7.org/linux/man-pages/man2/readv.2.html
 const max_iov = 1024;
 
-/// Upstream has to implement callback methods:
-///
-/// onRecv([]u8) usize      - called with received data,
-///                           returns number of consumed bytes,
-///                           non consumed part will be preserved for following calls
-/// onSend([]const u8)      - after successful send operation with buffer provided to send
-///                           buffer lifetime has to be until onSend is called
-/// onClose                 - after tcp connection is closed
-/// onError(anyerror)       - for error reporting
-/// onConnect()             - for client to server connections
-///
-pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
+pub fn ConnT(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
         allocator: mem.Allocator,
         io_loop: *io.Loop,
         handler: *Handler,
-        parent: ?*Parent = null,
         socket: posix.socket_t,
         state: State = .closed,
 
@@ -69,7 +57,7 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
         }
 
         /// Set connected tcp socket.
-        pub fn onConnect(self: *Self, socket: posix.socket_t) void {
+        pub fn connect(self: *Self, socket: posix.socket_t) void {
             self.socket = socket;
             self.state = .connected;
             // start multishot receive
@@ -235,12 +223,7 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
                 }
                 self.send_list.clearAndFree();
             }
-
-            // TODO rethink this
-            const self_parent = self.parent;
             self.handler.onClose();
-            if (self_parent) |parent|
-                parent.destroy(self);
         }
     };
 }
@@ -248,7 +231,7 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
 pub fn Client(comptime Handler: type) type {
     return struct {
         const Self = @This();
-        const Conn = ConnT(Handler, Self);
+        const Conn = ConnT(Handler);
 
         io_loop: *io.Loop,
         handler: *Handler,
@@ -293,7 +276,7 @@ pub fn Client(comptime Handler: type) type {
         }
 
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            self.conn.onConnect(socket);
+            self.conn.connect(socket);
             self.handler.onConnect();
         }
 
@@ -388,120 +371,11 @@ test "recv_buf remove" {
     try testing.expectEqualStrings("iso medo u ducan", recv_buf.buf);
 }
 
-/// Factory will be called to finish initialization.
-pub fn Listener(comptime Factory: type, comptime Handler: type) type {
-    return struct {
-        const Self = @This();
-
-        pub const Conn = ConnT(Handler, Self);
-
-        allocator: mem.Allocator,
-        socket: posix.socket_t = 0,
-        io_loop: *io.Loop,
-        accept_op: io.Op = .{},
-        close_op: io.Op = .{},
-        conns: std.AutoHashMap(*Conn, *Handler),
-        factory: *Factory,
-        metric: struct {
-            // Total number of
-            accept: usize = 0, // accepted connections
-            close: usize = 0, // closed (completed) connections
-        } = .{},
-
-        pub fn init(
-            allocator: mem.Allocator,
-            io_loop: *io.Loop,
-            factory: *Factory,
-        ) Self {
-            return .{
-                .allocator = allocator,
-                .io_loop = io_loop,
-                .factory = factory,
-                .conns = std.AutoHashMap(*Conn, *Handler).init(allocator),
-            };
-        }
-
-        /// Start multishot accept
-        pub fn bind(self: *Self, addr: net.Address) !void {
-            self.socket = try listenSocket(addr);
-            self.accept_op = io.Op.accept(self.socket, self, onAccept, onAcceptFail);
-            self.io_loop.submit(&self.accept_op);
-        }
-
-        pub fn deinit(self: *Self) void {
-            // destroy all connections
-            var iter = self.conns.iterator();
-            while (iter.next()) |kv| {
-                const tcp_conn = kv.key_ptr.*;
-                const conn = kv.value_ptr.*;
-                tcp_conn.deinit();
-                conn.deinit();
-                self.allocator.destroy(conn);
-                self.allocator.destroy(tcp_conn);
-            }
-            self.conns.deinit();
-        }
-
-        fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
-            // Create new collection
-            try self.conns.ensureUnusedCapacity(1);
-            const handler = try self.allocator.create(Handler);
-            errdefer self.allocator.destroy(handler);
-            const tcp_conn = try self.allocator.create(Conn);
-            errdefer self.allocator.destroy(tcp_conn);
-            tcp_conn.* = Conn.init(self.allocator, self.io_loop, handler);
-            tcp_conn.parent = self;
-            tcp_conn.onConnect(socket);
-            // Pass new connection to the child to finish initialization
-            self.factory.onAccept(handler, tcp_conn, socket, addr);
-
-            // Add to list of live connections
-            self.conns.putAssumeCapacityNoClobber(tcp_conn, handler);
-            self.metric.accept +%= 1;
-        }
-
-        fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
-            self.factory.onError(err);
-            self.io_loop.submit(&self.accept_op); // restart operation
-        }
-
-        /// Destroy closed connection
-        fn destroy(self: *Self, tcp_conn: *Conn) void {
-            const kv = (self.conns.fetchRemove(tcp_conn)) orelse unreachable;
-            const conn = kv.value;
-            tcp_conn.deinit();
-            conn.deinit();
-            self.allocator.destroy(conn);
-            self.allocator.destroy(tcp_conn);
-            self.metric.close +%= 1;
-        }
-
-        fn onCancel(self: *Self, _: ?anyerror) void {
-            self.close();
-        }
-
-        /// Stop listening and shutdown listening socket
-        pub fn close(self: *Self) void {
-            if (self.close_op.active()) return;
-            if (self.accept_op.active()) {
-                self.close_op = io.Op.cancel(&self.accept_op, self, onCancel);
-                return self.io_loop.submit(&self.close_op);
-            }
-            if (self.socket != 0) {
-                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
-                self.socket = 0;
-                return self.io_loop.submit(&self.close_op);
-            }
-            self.factory.onClose();
-        }
-    };
-}
-
 pub fn listenSocket(addr: net.Address) !posix.socket_t {
     return (try addr.listen(.{ .reuse_address = true })).stream.handle;
 }
 
-pub fn SimpleListener(comptime Factory: type) type {
+pub fn Listener(comptime Factory: type) type {
     return struct {
         const Self = @This();
 
@@ -529,7 +403,7 @@ pub fn SimpleListener(comptime Factory: type) type {
         }
 
         fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
-            self.factory.onAccept(socket, addr);
+            try self.factory.accept(socket, addr);
         }
 
         fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {

@@ -67,7 +67,7 @@ const Handler = struct {
     }
 
     fn send_(self: *Self) !void {
-        if (self.send_len > 1024 * 1024 * 1024) {
+        if (self.send_len > 1024 * 1024 * 8) {
             self.tcp.close();
             return;
         }

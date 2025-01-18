@@ -4,6 +4,7 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
+const InstanceMap = @import("tcp_echo_server.zig").InstanceMap;
 
 const log = std.log.scoped(.tcp);
 
@@ -34,7 +35,7 @@ pub fn main() !void {
         .allocator = allocator,
         .io_loop = &io_loop,
         .config = config,
-        .handlers = std.AutoHashMap(*Handler, void).init(allocator),
+        .handlers = InstanceMap(Handler).init(allocator),
     };
     defer factory.deinit();
 
@@ -45,7 +46,7 @@ pub fn main() !void {
     _ = try io_loop.run();
 }
 
-const Listener = io.tcp.SimpleListener(Factory);
+const Listener = io.tcp.Listener(Factory);
 
 const Factory = struct {
     const Self = @This();
@@ -53,41 +54,22 @@ const Factory = struct {
     allocator: mem.Allocator,
     io_loop: *io.Loop,
     config: io.tls.config.Server,
-    handlers: std.AutoHashMap(*Handler, void),
+    handlers: InstanceMap(Handler),
 
     fn deinit(self: *Self) void {
-        var iter = self.handlers.keyIterator();
-        while (iter.next()) |k| {
-            const handler = k.*;
-            handler.deinit();
-            self.allocator.destroy(handler);
-        }
         self.handlers.deinit();
     }
 
-    pub fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) void {
-        self.onAccept_(socket, addr) catch |err| {
-            log.err("acccept {}", .{err});
-        };
-    }
-
-    fn onAccept_(self: *Self, socket: posix.socket_t, addr: net.Address) !void {
-        try self.handlers.ensureUnusedCapacity(1);
-        const handler = try self.allocator.create(Handler);
-        errdefer self.allocator.destroy(handler);
+    pub fn accept(self: *Self, socket: posix.socket_t, addr: net.Address) !void {
+        const handler = try self.handlers.create();
+        errdefer self.handlers.destroy(handler);
 
         handler.* = .{
             .parent = self,
             .tls = undefined,
         };
         try handler.tls.init(self.allocator, self.io_loop, handler, socket, self.config);
-        self.handlers.putAssumeCapacityNoClobber(handler, {});
         log.debug("{*} connected socket: {} addr: {}", .{ handler, socket, addr });
-    }
-
-    fn destroy(self: *Self, handler: *Handler) void {
-        assert(self.handlers.remove(handler));
-        self.allocator.destroy(handler);
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
@@ -101,9 +83,10 @@ const Factory = struct {
 
 const Handler = struct {
     const Self = @This();
+    const Tcp = io.tls.Conn(Self);
 
     parent: *Factory,
-    tls: io.tls.Conn(Self),
+    tls: Tcp,
 
     pub fn deinit(self: *Self) void {
         self.tls.deinit();
@@ -126,14 +109,10 @@ const Handler = struct {
     pub fn onClose(self: *Self) void {
         log.debug("{*} closed", .{self});
         self.deinit();
-        self.parent.destroy(self);
+        self.parent.handlers.destroy(self);
     }
 
     pub fn onError(self: *Self, err: anyerror) void {
         log.err("{*} on error {}", .{ self, err });
     }
 };
-
-pub fn listenSocket(addr: net.Address) !posix.socket_t {
-    return (try addr.listen(.{ .reuse_address = true })).stream.handle;
-}
