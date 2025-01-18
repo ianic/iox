@@ -49,7 +49,7 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
             closing,
         };
 
-        fn init(allocator: mem.Allocator, io_loop: *io.Loop, handler: *Handler) Self {
+        pub fn init(allocator: mem.Allocator, io_loop: *io.Loop, handler: *Handler) Self {
             return .{
                 .allocator = allocator,
                 .io_loop = io_loop,
@@ -61,7 +61,7 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
             };
         }
 
-        fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self) void {
             self.allocator.free(self.send_iov);
             self.send_list.deinit();
             self.recv_buf.free();
@@ -69,7 +69,7 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
         }
 
         /// Set connected tcp socket.
-        fn onConnect(self: *Self, socket: posix.socket_t) void {
+        pub fn onConnect(self: *Self, socket: posix.socket_t) void {
             self.socket = socket;
             self.state = .connected;
             // start multishot receive
@@ -224,9 +224,22 @@ pub fn ConnT(comptime Handler: type, comptime Parent: type) type {
                 return;
 
             self.state = .closed;
-            self.sendCompleted();
+
+            { // release pending send buffers
+                self.sendCompleted();
+                for (self.send_list.items) |vec| {
+                    var buf: []const u8 = undefined;
+                    buf.ptr = vec.base;
+                    buf.len = vec.len;
+                    self.handler.onSend(buf);
+                }
+                self.send_list.clearAndFree();
+            }
+
+            // TODO rethink this
+            const self_parent = self.parent;
             self.handler.onClose();
-            if (self.parent) |parent|
+            if (self_parent) |parent|
                 parent.destroy(self);
         }
     };
@@ -486,4 +499,61 @@ pub fn Listener(comptime Factory: type, comptime Handler: type) type {
 
 pub fn listenSocket(addr: net.Address) !posix.socket_t {
     return (try addr.listen(.{ .reuse_address = true })).stream.handle;
+}
+
+pub fn SimpleListener(comptime Factory: type) type {
+    return struct {
+        const Self = @This();
+
+        socket: posix.socket_t = 0,
+        io_loop: *io.Loop,
+        accept_op: io.Op = .{},
+        close_op: io.Op = .{},
+        factory: *Factory,
+
+        pub fn init(
+            io_loop: *io.Loop,
+            factory: *Factory,
+        ) Self {
+            return .{
+                .io_loop = io_loop,
+                .factory = factory,
+            };
+        }
+
+        /// Start multishot accept
+        pub fn bind(self: *Self, addr: net.Address) !void {
+            self.socket = try listenSocket(addr);
+            self.accept_op = io.Op.accept(self.socket, self, onAccept, onAcceptFail);
+            self.io_loop.submit(&self.accept_op);
+        }
+
+        fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
+            self.factory.onAccept(socket, addr);
+        }
+
+        fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
+            self.factory.onError(err);
+            self.io_loop.submit(&self.accept_op); // restart operation
+        }
+
+        fn onCancel(self: *Self, _: ?anyerror) void {
+            self.close();
+        }
+
+        /// Stop listening
+        pub fn close(self: *Self) void {
+            if (self.close_op.active()) return;
+            if (self.accept_op.active()) {
+                self.close_op = io.Op.cancel(&self.accept_op, self, onCancel);
+                return self.io_loop.submit(&self.close_op);
+            }
+            if (self.socket != 0) {
+                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
+                self.socket = 0;
+                return self.io_loop.submit(&self.close_op);
+            }
+            self.factory.onClose();
+        }
+    };
 }

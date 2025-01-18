@@ -16,7 +16,8 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    const uri = "wss://ws.vi-server.org/mirror/";
+    //const uri = "wss://ws.vi-server.org/mirror/";
+    const uri = "wss://www.supersport.hr/api/sbk?preSub=dl_hr";
     var config = try io.ws.Config.fromUri(allocator, uri);
     defer config.deinit(allocator);
 
@@ -46,7 +47,7 @@ const Handler = struct {
 
     pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
         log.debug("{*} message: {s}", .{ self, msg.data });
-        self.ws.close();
+        // self.ws.close();
     }
 
     pub fn onError(self: *Self, err: anyerror) void {

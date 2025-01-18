@@ -36,18 +36,13 @@ pub fn main() !void {
     defer conn.deinit();
 
     _ = try io_loop.run();
-
-    if (conn.tls_cli.getError()) |err| {
-        log.err("tls {}", .{err});
-        return;
-    }
 }
 
 const Conn = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    tls_cli: io.tls.Client(*Self),
+    tls_cli: io.tls.Client(Self),
     send_len: usize = 1,
 
     pub fn init(
@@ -62,20 +57,27 @@ const Conn = struct {
             .tls_cli = undefined,
         };
         try self.tls_cli.init(allocator, io_loop, self, addr, opt);
+        self.tls_cli.connect();
     }
 
     pub fn deinit(self: *Self) void {
         self.tls_cli.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
-        try self.send();
+    pub fn onConnect(self: *Self) void {
+        self.send() catch |err| {
+            self.onError(err);
+            self.tls_cli.close();
+        };
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    pub fn onRecv(self: *Self, bytes: []const u8) usize {
         if (bytes.len == self.send_len) {
             for (0..bytes.len) |i| assert(bytes[i] == @as(u8, @intCast(i % 256)));
-            try self.send();
+            self.send() catch |err| {
+                self.onError(err);
+                self.tls_cli.close();
+            };
             log.debug("recv {} bytes done", .{bytes.len});
             return bytes.len;
         }
@@ -84,7 +86,7 @@ const Conn = struct {
     }
 
     fn send(self: *Self) !void {
-        if (self.send_len > 1024 * 1024) {
+        if (self.send_len > 1024 * 1024 * 128) {
             self.tls_cli.close();
             return;
         }
@@ -101,5 +103,9 @@ const Conn = struct {
     pub fn onClose(self: *Self) void {
         log.debug("{*} closed", .{self});
         posix.raise(posix.SIG.USR1) catch {};
+    }
+
+    pub fn onError(self: *Self, err: anyerror) void {
+        log.err("{*} {}", .{ self, err });
     }
 };

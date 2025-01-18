@@ -3,6 +3,7 @@ const io = @import("iox");
 const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
+const assert = std.debug.assert;
 
 const log = std.log.scoped(.tcp);
 
@@ -18,91 +19,106 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // use certs from tls.zig project
+    // Use certs from tls.zig project
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
     // Load server certificate key pair
     var auth = try io.tls.config.CertKeyPair.load(allocator, dir, "localhost_ec/cert.pem", "localhost_ec/key.pem");
     defer auth.deinit(allocator);
-    const opt: io.tls.config.Server = .{ .auth = &auth };
+    const config: io.tls.config.Server = .{ .auth = &auth };
 
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
+    var factory: Factory = .{
+        .allocator = allocator,
+        .io_loop = &io_loop,
+        .config = config,
+        .handlers = std.AutoHashMap(*Handler, void).init(allocator),
+    };
+    defer factory.deinit();
+
+    var listener = Listener.init(&io_loop, &factory);
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
-    var listener: Listener = undefined;
-    try listener.init(allocator, &io_loop, try listenSocket(addr), opt);
-    defer listener.deinit();
+    try listener.bind(addr);
 
     _ = try io_loop.run();
 }
 
-const Listener = struct {
+const Listener = io.tcp.SimpleListener(Factory);
+
+const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    socket: posix.socket_t,
     io_loop: *io.Loop,
-    parent: io.tcp.Listener(*Self, Conn),
-    tls_opt: io.tls.config.Server,
+    config: io.tls.config.Server,
+    handlers: std.AutoHashMap(*Handler, void),
 
-    pub fn init(
-        self: *Self,
-        allocator: mem.Allocator,
-        io_loop: *io.Loop,
-        socket: posix.socket_t,
-        tls_opt: io.tls.config.Server,
-    ) !void {
-        self.* = .{
-            .allocator = allocator,
-            .socket = socket,
-            .io_loop = io_loop,
-            .parent = io.tcp.Listener(*Self, Conn).init(allocator, io_loop, socket, self),
-            .tls_opt = tls_opt,
+    fn deinit(self: *Self) void {
+        var iter = self.handlers.keyIterator();
+        while (iter.next()) |k| {
+            const handler = k.*;
+            handler.deinit();
+            self.allocator.destroy(handler);
+        }
+        self.handlers.deinit();
+    }
+
+    pub fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) void {
+        self.onAccept_(socket, addr) catch |err| {
+            log.err("acccept {}", .{err});
         };
-        self.parent.run();
     }
 
-    pub fn deinit(self: *Self) void {
-        self.parent.deinit();
+    fn onAccept_(self: *Self, socket: posix.socket_t, addr: net.Address) !void {
+        try self.handlers.ensureUnusedCapacity(1);
+        const handler = try self.allocator.create(Handler);
+        errdefer self.allocator.destroy(handler);
+
+        handler.* = .{
+            .parent = self,
+            .tls = undefined,
+        };
+        try handler.tls.init(self.allocator, self.io_loop, handler, socket, self.config);
+        self.handlers.putAssumeCapacityNoClobber(handler, {});
+        log.debug("{*} connected socket: {} addr: {}", .{ handler, socket, addr });
     }
 
-    /// Called by parent listener when it accepts new tcp connection.
-    pub fn onAccept(self: *Self, conn: *Conn, socket: posix.socket_t, addr: net.Address) !void {
-        // Init connection
-        conn.* = .{ .listener = self, .tls_conn = undefined };
-        // Init tls
-        try conn.tls_conn.init(self.allocator, self.io_loop, conn, socket, self.tls_opt);
-        log.debug("{*} connected socket: {} addr: {}", .{ conn, socket, addr });
+    fn destroy(self: *Self, handler: *Handler) void {
+        assert(self.handlers.remove(handler));
+        self.allocator.destroy(handler);
     }
 
-    /// Called when parent listener is closed.
-    pub fn onClose(_: *Self) void {}
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("listener on error {}", .{err});
+    }
 
-    pub fn destroy(self: *Self, conn: *Conn) void {
-        self.parent.destroy(conn);
+    pub fn onClose(_: *Self) void {
+        log.debug("listener closed ", .{});
     }
 };
 
-const Conn = struct {
+const Handler = struct {
     const Self = @This();
 
-    listener: *Listener,
-    tls_conn: io.tls.Conn(*Self),
+    parent: *Factory,
+    tls: io.tls.Conn(Self),
 
     pub fn deinit(self: *Self) void {
-        self.tls_conn.deinit();
+        self.tls.deinit();
     }
 
     /// Called by tls connection when it successfully finishes handshake.
-    pub fn onConnect(_: *Self) !void {
+    pub fn onConnect(_: *Self) void {
         // tls handshake is done
     }
 
-    /// Called by tls connection with cleartext data when it receives chipertext
-    /// and decrytps it.
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
-        try self.tls_conn.send(bytes);
+    pub fn onRecv(self: *Self, bytes: []const u8) usize {
+        self.tls.send(bytes) catch |err| {
+            log.err("{*} send {}", .{ self, err });
+            self.tls.close();
+        };
         return bytes.len;
     }
 
@@ -110,7 +126,11 @@ const Conn = struct {
     pub fn onClose(self: *Self) void {
         log.debug("{*} closed", .{self});
         self.deinit();
-        self.listener.destroy(self);
+        self.parent.destroy(self);
+    }
+
+    pub fn onError(self: *Self, err: anyerror) void {
+        log.err("{*} on error {}", .{ self, err });
     }
 };
 
