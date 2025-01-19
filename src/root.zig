@@ -22,6 +22,8 @@ pub const tls = struct {
     const _tls = @import("tls.zig");
 
     pub const config = _lib.config;
+    pub const HandshakeKind = _tls.HandshakeKind;
+
     pub const Conn = _tls.Conn;
     pub const Connector = _tls.Connector;
     pub const Listener = _tls.Listener;

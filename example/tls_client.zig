@@ -99,7 +99,7 @@ const Factory = struct {
 
 const Https = struct {
     const Self = @This();
-    const Tls = io.tls.Conn(Self, io.tls.config.Client);
+    const Tls = io.tls.Conn(Self, .client);
 
     allocator: mem.Allocator,
     host: []const u8,

@@ -67,14 +67,16 @@ fn LibFacade(comptime T: type) type {
     };
 }
 
-// TODO: naming, replace Config with handshake type: client/server (active/passive)
-pub fn Conn(comptime Handler: type, comptime Config: type) type {
-    // TODO: why this check
-    switch (Config) {
-        io.tls.config.Client => {},
-        io.tls.config.Server => {},
-        else => unreachable,
-    }
+pub const HandshakeKind = enum {
+    client,
+    server,
+};
+
+pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
+    const Config = switch (handshake) {
+        .client => io.tls.config.Client,
+        .server => io.tls.config.Server,
+    };
     return struct {
         const Self = @This();
         const Tcp = io.tcp.Conn(TcpFacade(Self));
@@ -105,8 +107,8 @@ pub fn Conn(comptime Handler: type, comptime Config: type) type {
                 },
             };
             self.tcp.open(socket);
-            // TODO
-            if (Config == io.tls.config.Client) {
+            if (handshake == .client) {
+                // client is doing active handshake, server passive
                 self.lib.connect() catch |err| {
                     self.handler.onError(err);
                     return self.tcp.close();

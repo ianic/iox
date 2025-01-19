@@ -86,7 +86,7 @@ const Factory = struct {
 
 const Handler = struct {
     const Self = @This();
-    const Tls = io.tls.Conn(Self, io.tls.config.Client);
+    const Tls = io.tls.Conn(Self, .client);
 
     allocator: mem.Allocator,
     tls: Tls,
