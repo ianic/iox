@@ -12,21 +12,25 @@ test {
     const Handler = struct {
         const Self = @This();
         pub fn onConnect(_: *Self) void {}
-        pub fn onMessage(_: *Self, _: io.ws.Msg) void {}
+        pub fn onRecv(_: *Self, _: io.ws.Msg) void {}
         pub fn onError(_: *Self, _: anyerror) void {}
         pub fn onClose(_: *Self) void {}
     };
     { // ensure it compiles
+        var io_loop: io.Loop = undefined;
+        try io_loop.init(testing.allocator, .{});
+        defer io_loop.deinit();
+
         var handler: Handler = .{};
         var ws_cli: Conn(Handler) = undefined;
-        try ws_cli.init(testing.allocator, undefined, &handler, Config.empty);
+        try ws_cli.init(testing.allocator, &io_loop, &handler, 0, Config.empty);
         defer ws_cli.deinit();
     }
     { // note about type sizes
         try testing.expectEqual(208, @sizeOf(Conn(Handler)));
         try testing.expectEqual(152, @sizeOf(Conn(Handler).Lib));
-        try testing.expectEqual(640, @sizeOf(Conn(Handler).Tcp));
-        try testing.expectEqual(944, @sizeOf(Conn(Handler).Tls));
+        try testing.expectEqual(376, @sizeOf(Conn(Handler).Tcp));
+        try testing.expectEqual(680, @sizeOf(Conn(Handler).Tls));
         try testing.expectEqual(208, @sizeOf(Config));
         try testing.expectEqual(16, @sizeOf(Conn(Handler).Transport));
     }
@@ -165,7 +169,9 @@ pub fn Conn(comptime Handler: type) type {
                     },
                 },
             };
-            // TODO: only if client side connection
+        }
+
+        fn open(self: *Self) void {
             self.lib.connect() catch |err| {
                 self.handler.onError(err);
                 self.close();
@@ -177,17 +183,6 @@ pub fn Conn(comptime Handler: type) type {
             self.transport.destroy(self.allocator);
             self.lib.deinit();
         }
-
-        // pub fn connect(
-        //     self: *Self,
-        //     allocator: mem.Allocator,
-        //     io_loop: *io.Loop,
-        //     handler: *Handler,
-        //     config: Config,
-        // ) !void {
-        //     try self.init(allocator, io_loop, handler, config);
-        //     self.transport.connect();
-        // }
 
         pub fn send(self: *Self, msg: io.ws.Msg) !void {
             try self.lib.send(msg);
@@ -311,4 +306,5 @@ pub fn Listener(comptime Factory: type) type {
 fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
     const handler, var conn = try factory.create();
     try conn.init(allocator, io_loop, handler, socket, factory.config);
+    conn.open();
 }
