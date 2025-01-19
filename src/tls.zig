@@ -88,7 +88,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
         tcp_facade: TcpFacade(Self),
         lib_facade: LibFacade(Self),
 
-        fn init(
+        pub fn init(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,

@@ -27,10 +27,8 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var handlers = try allocator.alloc(Handler, cases_count);
-    defer allocator.free(handlers);
-    var configs = try allocator.alloc(io.ws.Config, cases_count);
-    defer allocator.free(configs);
+    var clients = try allocator.alloc(Client, cases_count);
+    defer allocator.free(clients);
 
     var case_no: usize = 1;
     while (case_no <= cases_count) : (case_no += 1) {
@@ -47,25 +45,71 @@ pub fn main() !void {
                 .{ hostname, port, case_no },
             ),
         };
-        configs[idx] = config;
         log.debug("connecting to {s}", .{config.uri});
 
-        var handler = &handlers[idx];
-        try handler.ws.connect(allocator, &io_loop, handler, config);
+        var client = &clients[idx];
+        client.init(allocator, &io_loop, config);
     }
 
     try io_loop.drain();
 
     for (0..cases_count) |i| {
-        configs[i].deinit(allocator);
-        handlers[i].deinit();
+        clients[i].deinit();
     }
 }
 
-const Handler = struct {
+const Client = struct {
     const Self = @This();
 
-    ws: io.ws.Client(Self),
+    allocator: mem.Allocator,
+    config: io.ws.Config,
+    handler: ?*Handler = null,
+    connector: io.ws.Connector(Self),
+
+    fn init(
+        self: *Self,
+        allocator: mem.Allocator,
+        io_loop: *io.Loop,
+        config: io.ws.Config,
+    ) void {
+        self.* = .{
+            .allocator = allocator,
+            .config = config,
+            .connector = io.ws.Connector(Self).init(allocator, io_loop, self, config.addr),
+        };
+        self.connector.connect();
+    }
+
+    fn deinit(self: *Self) void {
+        if (self.handler) |handler| {
+            handler.deinit();
+            self.allocator.destroy(handler);
+        }
+        self.config.deinit(self.allocator);
+    }
+
+    pub fn create(self: *Self) !struct { *Handler, *Handler.Ws } {
+        const handler = try self.allocator.create(Handler);
+        errdefer self.allocator.destroy(handler);
+        handler.* = .{ .ws = undefined };
+        self.handler = handler;
+        return .{ handler, &handler.ws };
+    }
+
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("connect error {}", .{err});
+    }
+
+    pub fn onClose(_: *Self) void {
+        log.debug("connector closed ", .{});
+    }
+};
+
+const Handler = struct {
+    const Self = @This();
+    const Ws = io.ws.Conn(Self);
+
+    ws: Ws,
 
     fn deinit(self: *Self) void {
         self.ws.deinit();

@@ -49,7 +49,8 @@ pub fn Conn(comptime Handler: type) type {
             };
         }
 
-        fn initInstance(
+        // TODO remove init, rename this to init
+        pub fn initInstance(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,

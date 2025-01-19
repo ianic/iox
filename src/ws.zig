@@ -1,9 +1,11 @@
 const std = @import("std");
 const net = std.net;
 const mem = std.mem;
+const posix = std.posix;
+const testing = std.testing;
+
 const io = @import("root.zig");
 const ws = @import("ws");
-const testing = std.testing;
 
 // Definition of Handler interface
 test {
@@ -16,28 +18,28 @@ test {
     };
     { // ensure it compiles
         var handler: Handler = .{};
-        var ws_cli: Client(Handler) = undefined;
+        var ws_cli: Conn(Handler) = undefined;
         try ws_cli.init(testing.allocator, undefined, &handler, Config.empty);
         defer ws_cli.deinit();
     }
     { // note about type sizes
-        try testing.expectEqual(208, @sizeOf(Client(Handler)));
-        try testing.expectEqual(152, @sizeOf(Client(Handler).Lib));
-        try testing.expectEqual(640, @sizeOf(Client(Handler).Tcp));
-        try testing.expectEqual(944, @sizeOf(Client(Handler).Tls));
+        try testing.expectEqual(208, @sizeOf(Conn(Handler)));
+        try testing.expectEqual(152, @sizeOf(Conn(Handler).Lib));
+        try testing.expectEqual(640, @sizeOf(Conn(Handler).Tcp));
+        try testing.expectEqual(944, @sizeOf(Conn(Handler).Tls));
         try testing.expectEqual(208, @sizeOf(Config));
-        try testing.expectEqual(16, @sizeOf(Client(Handler).Transport));
+        try testing.expectEqual(16, @sizeOf(Conn(Handler).Transport));
     }
 }
 
 /// Handler: upstream application handler, required event handler methods
 /// defined above.
-pub fn Client(comptime Handler: type) type {
+pub fn Conn(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
-        const Tcp = io.tcp.Client(TransportFacade);
-        const Tls = io.tls.Client(TransportFacade);
+        const Tcp = io.tcp.Conn(TransportFacade);
+        const Tls = io.tls.Conn(TransportFacade, .client);
         const Lib = ws.asyn.Client(LibFacade);
 
         // Downstream transport protocol interface
@@ -128,16 +130,17 @@ pub fn Client(comptime Handler: type) type {
 
         allocator: mem.Allocator,
         handler: *Handler,
-        transport_facade: TransportFacade,
-        lib_facade: LibFacade,
         transport: Transport,
+        transport_facade: TransportFacade,
         lib: Lib,
+        lib_facade: LibFacade,
 
         fn init(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             handler: *Handler,
+            socket: posix.socket_t,
             config: Config,
         ) !void {
             self.* = .{
@@ -149,7 +152,7 @@ pub fn Client(comptime Handler: type) type {
                 .transport = switch (config.scheme) {
                     .wss => brk: {
                         const tls_cli = try allocator.create(Tls);
-                        try tls_cli.init(allocator, io_loop, &self.transport_facade, config.addr, .{
+                        try tls_cli.init(allocator, io_loop, &self.transport_facade, socket, .{
                             .host = config.host,
                             .root_ca = config.root_ca.?,
                         });
@@ -157,10 +160,15 @@ pub fn Client(comptime Handler: type) type {
                     },
                     .ws => brk: {
                         const tcp_cli = try allocator.create(Tcp);
-                        tcp_cli.* = Tcp.init(allocator, io_loop, &self.transport_facade, config.addr);
+                        tcp_cli.initInstance(allocator, io_loop, &self.transport_facade, socket);
                         break :brk .{ .tcp = tcp_cli };
                     },
                 },
+            };
+            // TODO: only if client side connection
+            self.lib.connect() catch |err| {
+                self.handler.onError(err);
+                self.close();
             };
         }
 
@@ -170,16 +178,16 @@ pub fn Client(comptime Handler: type) type {
             self.lib.deinit();
         }
 
-        pub fn connect(
-            self: *Self,
-            allocator: mem.Allocator,
-            io_loop: *io.Loop,
-            handler: *Handler,
-            config: Config,
-        ) !void {
-            try self.init(allocator, io_loop, handler, config);
-            self.transport.connect();
-        }
+        // pub fn connect(
+        //     self: *Self,
+        //     allocator: mem.Allocator,
+        //     io_loop: *io.Loop,
+        //     handler: *Handler,
+        //     config: Config,
+        // ) !void {
+        //     try self.init(allocator, io_loop, handler, config);
+        //     self.transport.connect();
+        // }
 
         pub fn send(self: *Self, msg: io.ws.Msg) !void {
             try self.lib.send(msg);
@@ -288,4 +296,19 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
     defer list.deinit();
     if (list.addrs.len == 0) return error.UnknownHostName;
     return list.addrs[0];
+}
+
+const _tcp = @import("tcp.zig");
+
+pub fn Connector(comptime Factory: type) type {
+    return _tcp.GenericConnector(Factory, upgrade);
+}
+
+pub fn Listener(comptime Factory: type) type {
+    return _tcp.GenericListener(Factory, upgrade);
+}
+
+fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
+    const handler, var conn = try factory.create();
+    try conn.init(allocator, io_loop, handler, socket, factory.config);
 }

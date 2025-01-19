@@ -34,8 +34,10 @@ pub const ws = struct {
     const _lib = @import("ws");
 
     pub const Msg = _lib.Msg;
-    pub const Client = _ws.Client;
     pub const Config = _ws.Config;
+
+    pub const Conn = _ws.Conn;
+    pub const Connector = _ws.Connector;
 };
 
 pub const timer = @import("timer.zig");
