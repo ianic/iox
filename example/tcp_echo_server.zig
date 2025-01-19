@@ -23,14 +23,10 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var factory: Factory = .{
-        .allocator = allocator,
-        .io_loop = &io_loop,
-        .handlers = InstanceMap(Handler).init(allocator),
-    };
+    var factory = Factory.init(allocator);
     defer factory.deinit();
 
-    var listener = Listener.init(&io_loop, &factory);
+    var listener = Listener.init(allocator, &io_loop, &factory);
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
     try listener.bind(addr);
 
@@ -43,22 +39,27 @@ const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    io_loop: *io.Loop,
     handlers: InstanceMap(Handler),
+
+    fn init(allocator: mem.Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .handlers = InstanceMap(Handler).init(allocator),
+        };
+    }
 
     fn deinit(self: *Self) void {
         self.handlers.deinit();
     }
 
-    pub fn accept(self: *Self, socket: posix.socket_t, addr: net.Address) !void {
+    pub fn create(self: *Self) !struct { *Handler, *io.tcp.Conn(Handler) } {
         const handler = try self.handlers.create();
         handler.* = .{
             .allocator = self.allocator,
             .parent = self,
-            .tcp = Handler.Tcp.init(self.allocator, self.io_loop, handler),
+            .tcp = undefined,
         };
-        handler.tcp.connect(socket);
-        log.debug("{*} connected socket: {} addr: {}", .{ handler, socket, addr });
+        return .{ handler, &handler.tcp };
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
@@ -80,6 +81,10 @@ const Handler = struct {
 
     pub fn deinit(self: *Self) void {
         self.tcp.deinit();
+    }
+
+    pub fn onConnect(self: *Self) void {
+        log.debug("{*} connected socket: {} ", .{ self, self.tcp.socket });
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) usize {

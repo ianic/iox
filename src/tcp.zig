@@ -13,7 +13,7 @@ const log = std.log.scoped(.io_tcp);
 // ref: https://man7.org/linux/man-pages/man2/readv.2.html
 const max_iov = 1024;
 
-pub fn ConnT(comptime Handler: type) type {
+pub fn Conn(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
@@ -33,7 +33,7 @@ pub fn ConnT(comptime Handler: type) type {
 
         const State = enum {
             closed,
-            connected,
+            open,
             closing,
         };
 
@@ -49,17 +49,29 @@ pub fn ConnT(comptime Handler: type) type {
             };
         }
 
+        fn initInstance(
+            self: *Self,
+            allocator: mem.Allocator,
+            io_loop: *io.Loop,
+            handler: *Handler,
+            socket: posix.socket_t,
+        ) void {
+            self.* = Self.init(allocator, io_loop, handler);
+            self.open(socket);
+        }
+
         pub fn deinit(self: *Self) void {
+            self.freeBuffers();
             self.allocator.free(self.send_iov);
             self.send_list.deinit();
             self.recv_buf.free();
             self.* = undefined;
         }
 
-        /// Set connected tcp socket.
-        pub fn connect(self: *Self, socket: posix.socket_t) void {
+        /// Set connected tcp socket and start multishot receive operation.
+        pub fn open(self: *Self, socket: posix.socket_t) void {
             self.socket = socket;
-            self.state = .connected;
+            self.state = .open;
             // start multishot receive
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
             self.io_loop.submit(&self.recv_op);
@@ -175,7 +187,7 @@ pub fn ConnT(comptime Handler: type) type {
                 self.close();
             };
 
-            if (!self.recv_op.hasMore() and self.state == .connected)
+            if (!self.recv_op.hasMore() and self.state == .open)
                 self.io_loop.submit(&self.recv_op);
         }
 
@@ -213,107 +225,20 @@ pub fn ConnT(comptime Handler: type) type {
 
             self.state = .closed;
 
-            { // release pending send buffers
-                self.sendCompleted();
-                for (self.send_list.items) |vec| {
-                    var buf: []const u8 = undefined;
-                    buf.ptr = vec.base;
-                    buf.len = vec.len;
-                    self.handler.onSend(buf);
-                }
-                self.send_list.clearAndFree();
-            }
-            self.handler.onClose();
-        }
-    };
-}
-
-pub fn Client(comptime Handler: type) type {
-    return struct {
-        const Self = @This();
-        const Conn = ConnT(Handler);
-
-        io_loop: *io.Loop,
-        handler: *Handler,
-        address: std.net.Address,
-        conn: Conn,
-
-        connect_op: io.Op = .{},
-        close_op: io.Op = .{},
-
-        pub fn init(
-            allocator: mem.Allocator,
-            io_loop: *io.Loop,
-            handler: *Handler,
-            address: net.Address,
-        ) Self {
-            return .{
-                .io_loop = io_loop,
-                .handler = handler,
-                .address = address,
-                .conn = Conn.init(allocator, io_loop, handler),
-            };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.conn.deinit();
-            self.* = undefined;
-        }
-
-        /// Start connect operation. `onConnect` callback will be fired when
-        /// finished.
-        pub fn connect(self: *Self) void {
-            assert(self.conn.state == .closed);
-            assert(!self.connect_op.active() and !self.close_op.active());
-
-            self.connect_op = io.Op.connect(
-                .{ .addr = &self.address },
-                self,
-                onConnect,
-                onConnectFail,
-            );
-            self.io_loop.submit(&self.connect_op);
-        }
-
-        fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            self.conn.connect(socket);
-            self.handler.onConnect();
-        }
-
-        fn onConnectFail(self: *Self, mybe_err: ?anyerror) void {
-            if (mybe_err) |err| self.handler.onError(err);
-            self.close();
-        }
-
-        pub fn sendZc(self: *Self, buf: []const u8) io.Error!void {
-            try self.conn.sendZc(buf);
-        }
-
-        pub fn sendVZc(self: *Self, vec: []const []const u8) io.Error!void {
-            try self.conn.sendVZc(vec);
-        }
-
-        fn onCancel(self: *Self, _: ?anyerror) void {
-            self.close();
-        }
-
-        pub fn close(self: *Self) void {
-            if (self.conn.state != .closed)
-                return self.conn.close();
-
-            if (self.connect_op.active() and !self.close_op.active()) {
-                self.close_op = io.Op.cancel(&self.connect_op, self, onCancel);
-                return self.io_loop.submit(&self.close_op);
-            }
-
-            if (self.connect_op.active() or
-                self.close_op.active())
-                return;
-
+            self.freeBuffers();
             self.handler.onClose();
         }
 
-        fn destroy(_: *Self, _: *Conn) void {}
+        fn freeBuffers(self: *Self) void {
+            self.sendCompleted();
+            for (self.send_list.items) |vec| {
+                var buf: []const u8 = undefined;
+                buf.ptr = vec.base;
+                buf.len = vec.len;
+                self.handler.onSend(buf);
+            }
+            self.send_list.clearAndFree();
+        }
     };
 }
 
@@ -379,6 +304,7 @@ pub fn Listener(comptime Factory: type) type {
     return struct {
         const Self = @This();
 
+        allocator: mem.Allocator,
         socket: posix.socket_t = 0,
         io_loop: *io.Loop,
         accept_op: io.Op = .{},
@@ -386,10 +312,12 @@ pub fn Listener(comptime Factory: type) type {
         factory: *Factory,
 
         pub fn init(
+            allocator: mem.Allocator,
             io_loop: *io.Loop,
             factory: *Factory,
         ) Self {
             return .{
+                .allocator = allocator,
                 .io_loop = io_loop,
                 .factory = factory,
             };
@@ -403,7 +331,10 @@ pub fn Listener(comptime Factory: type) type {
         }
 
         fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
-            try self.factory.accept(socket, addr);
+            _ = addr;
+            var handler, var conn = try self.factory.create();
+            conn.initInstance(self.allocator, self.io_loop, handler, socket);
+            handler.onConnect();
         }
 
         fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
@@ -436,6 +367,7 @@ pub fn Connector(comptime Factory: type) type {
     return struct {
         const Self = @This();
 
+        allocator: mem.Allocator,
         address: std.net.Address,
         io_loop: *io.Loop,
         connect_op: io.Op = .{},
@@ -443,11 +375,13 @@ pub fn Connector(comptime Factory: type) type {
         factory: *Factory,
 
         pub fn init(
+            allocator: mem.Allocator,
             io_loop: *io.Loop,
             factory: *Factory,
             address: net.Address,
         ) Self {
             return .{
+                .allocator = allocator,
                 .io_loop = io_loop,
                 .factory = factory,
                 .address = address,
@@ -467,7 +401,9 @@ pub fn Connector(comptime Factory: type) type {
         }
 
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            try self.factory.connect(socket, self.address);
+            var handler, var conn = try self.factory.create();
+            conn.initInstance(self.allocator, self.io_loop, handler, socket);
+            handler.onConnect();
         }
 
         fn onConnectFail(self: *Self, err: ?anyerror) void {
