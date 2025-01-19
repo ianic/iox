@@ -9,12 +9,11 @@ const log = std.log.scoped(.main);
 pub const std_options = std.Options{ .log_level = .debug };
 
 pub fn main() !void {
-    assert(std.os.argv.len > 1);
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    assert(std.os.argv.len > 1);
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 

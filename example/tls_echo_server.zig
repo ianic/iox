@@ -31,45 +31,43 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var factory: Factory = .{
-        .allocator = allocator,
-        .io_loop = &io_loop,
-        .config = config,
-        .handlers = InstanceMap(Handler).init(allocator),
-    };
+    var factory = Factory.init(allocator, config);
     defer factory.deinit();
 
-    var listener = Listener.init(&io_loop, &factory);
+    var listener = io.tls.Listener(Factory).init(allocator, &io_loop, &factory);
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
     try listener.bind(addr);
 
     _ = try io_loop.run();
 }
 
-const Listener = io.tcp.Listener(Factory);
-
 const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    io_loop: *io.Loop,
     config: io.tls.config.Server,
     handlers: InstanceMap(Handler),
+
+    fn init(allocator: mem.Allocator, config: io.tls.config.Server) Self {
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .handlers = InstanceMap(Handler).init(allocator),
+        };
+    }
 
     fn deinit(self: *Self) void {
         self.handlers.deinit();
     }
 
-    pub fn accept(self: *Self, socket: posix.socket_t, addr: net.Address) !void {
+    pub fn create(self: *Self) !struct { *Handler, *Handler.Tls } {
         const handler = try self.handlers.create();
         errdefer self.handlers.destroy(handler);
-
         handler.* = .{
             .parent = self,
             .tls = undefined,
         };
-        try handler.tls.init(self.allocator, self.io_loop, handler, socket, self.config);
-        log.debug("{*} connected socket: {} addr: {}", .{ handler, socket, addr });
+        return .{ handler, &handler.tls };
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
@@ -83,18 +81,17 @@ const Factory = struct {
 
 const Handler = struct {
     const Self = @This();
-    const Tcp = io.tls.Conn(Self);
+    const Tls = io.tls.Conn(Self, io.tls.config.Server);
 
     parent: *Factory,
-    tls: Tcp,
+    tls: Tls,
 
     pub fn deinit(self: *Self) void {
         self.tls.deinit();
     }
 
-    /// Called by tls connection when it successfully finishes handshake.
-    pub fn onConnect(_: *Self) void {
-        // tls handshake is done
+    pub fn onConnect(self: *Self) void {
+        log.debug("{*} connected", .{self});
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) usize {

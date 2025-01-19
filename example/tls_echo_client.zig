@@ -5,25 +5,19 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.tcp);
+const log = std.log.scoped(.main);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{});
-    defer io_loop.deinit();
-
+    // tls config
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
     var root_ca = try io.tls.config.CertBundle.fromFile(allocator, dir, "minica.pem");
     defer root_ca.deinit(allocator);
-
-    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
-
     var diagnostic: io.tls.config.Client.Diagnostic = .{};
-    const opt: io.tls.config.Client = .{
+    const config: io.tls.config.Client = .{
         .host = "localhost",
         .root_ca = root_ca,
         .diagnostic = &diagnostic,
@@ -31,43 +25,81 @@ pub fn main() !void {
         // .cipher_suites = &[_]io.tls.options.CipherSuite{.RSA_WITH_AES_128_CBC_SHA},
     };
 
-    var conn: Conn = undefined;
-    try conn.init(allocator, &io_loop, addr, opt);
-    defer conn.deinit();
+    var io_loop: io.Loop = undefined;
+    try io_loop.init(allocator, .{});
+    defer io_loop.deinit();
+
+    var factory = Factory.init(allocator, config);
+    defer factory.deinit();
+
+    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
+    var connector = io.tls.Connector(Factory).init(allocator, &io_loop, &factory, addr);
+    connector.connect();
 
     _ = try io_loop.run();
 }
 
-const Conn = struct {
+const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    tls_cli: io.tls.Client(Self),
-    send_len: usize = 1,
+    config: io.tls.config.Client,
+    handler: ?*Handler = null,
 
-    pub fn init(
-        self: *Self,
+    fn init(
         allocator: mem.Allocator,
-        io_loop: *io.Loop,
-        addr: net.Address,
-        opt: io.tls.config.Client,
-    ) !void {
-        self.* = .{
+        config: io.tls.config.Client,
+    ) Self {
+        return .{
             .allocator = allocator,
-            .tls_cli = undefined,
+            .config = config,
         };
-        try self.tls_cli.init(allocator, io_loop, self, addr, opt);
-        self.tls_cli.connect();
     }
 
+    fn deinit(self: *Self) void {
+        if (self.handler) |handler| {
+            handler.deinit();
+            self.allocator.destroy(handler);
+        }
+    }
+
+    pub fn create(self: *Self) !struct { *Handler, *Handler.Tls } {
+        const handler = try self.allocator.create(Handler);
+        errdefer self.allocator.destroy(handler);
+        handler.* = .{
+            .allocator = self.allocator,
+            .tls = undefined,
+        };
+        self.handler = handler;
+        return .{ handler, &handler.tls };
+    }
+
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("connect error {}", .{err});
+    }
+
+    pub fn onClose(_: *Self) void {
+        log.debug("connector closed ", .{});
+        posix.raise(posix.SIG.USR1) catch {};
+    }
+};
+
+const Handler = struct {
+    const Self = @This();
+    const Tls = io.tls.Conn(Self, io.tls.config.Client);
+
+    allocator: mem.Allocator,
+    tls: Tls,
+    send_len: usize = 1,
+
     pub fn deinit(self: *Self) void {
-        self.tls_cli.deinit();
+        self.tls.deinit();
     }
 
     pub fn onConnect(self: *Self) void {
         self.send() catch |err| {
             self.onError(err);
-            self.tls_cli.close();
+            self.tls.close();
         };
     }
 
@@ -76,18 +108,18 @@ const Conn = struct {
             for (0..bytes.len) |i| assert(bytes[i] == @as(u8, @intCast(i % 256)));
             self.send() catch |err| {
                 self.onError(err);
-                self.tls_cli.close();
+                self.tls.close();
             };
             log.debug("recv {} bytes done", .{bytes.len});
             return bytes.len;
         }
-        log.debug("recv {} bytes waiting for more", .{bytes.len});
+        // log.debug("recv {} bytes waiting for more", .{bytes.len});
         return 0;
     }
 
     fn send(self: *Self) !void {
         if (self.send_len > 1024 * 1024 * 128) {
-            self.tls_cli.close();
+            self.tls.close();
             return;
         }
 
@@ -96,8 +128,8 @@ const Conn = struct {
         defer self.allocator.free(buf);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
 
-        log.debug("sending {} bytes", .{buf.len});
-        try self.tls_cli.send(buf);
+        // log.debug("sending {} bytes", .{buf.len});
+        try self.tls.send(buf);
     }
 
     pub fn onClose(self: *Self) void {

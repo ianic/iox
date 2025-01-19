@@ -69,5 +69,3 @@ fn dhumpStackTrace() void {
     std.debug.captureStackTrace(null, &stack_trace);
     std.debug.dumpStackTrace(stack_trace);
 }
-
-const testing = std.testing;

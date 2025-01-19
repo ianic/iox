@@ -7,6 +7,7 @@ pub const Options = io.Options;
 
 pub const tcp = struct {
     const _tcp = @import("tcp.zig");
+
     pub const Conn = _tcp.Conn;
     pub const Listener = _tcp.Listener;
     pub const Connector = _tcp.Connector;
@@ -21,9 +22,9 @@ pub const tls = struct {
     const _tls = @import("tls.zig");
 
     pub const config = _lib.config;
-    pub const Client = _tls.Client;
     pub const Conn = _tls.Conn;
-    pub const Conn2 = _tls.Conn2;
+    pub const Connector = _tls.Connector;
+    pub const Listener = _tls.Listener;
 };
 
 pub const ws = struct {

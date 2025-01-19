@@ -301,6 +301,13 @@ pub fn listenSocket(addr: net.Address) !posix.socket_t {
 }
 
 pub fn Listener(comptime Factory: type) type {
+    return GenericListener(Factory, upgrade);
+}
+
+pub fn GenericListener(
+    comptime Factory: type,
+    comptime upgradeFn: *const fn (mem.Allocator, *io.Loop, anytype, posix.socket_t) io.Error!void,
+) type {
     return struct {
         const Self = @This();
 
@@ -332,9 +339,7 @@ pub fn Listener(comptime Factory: type) type {
 
         fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
             _ = addr;
-            var handler, var conn = try self.factory.create();
-            conn.initInstance(self.allocator, self.io_loop, handler, socket);
-            handler.onConnect();
+            try upgradeFn(self.allocator, self.io_loop, self.factory, socket);
         }
 
         fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
@@ -364,6 +369,19 @@ pub fn Listener(comptime Factory: type) type {
 }
 
 pub fn Connector(comptime Factory: type) type {
+    return GenericConnector(Factory, upgrade);
+}
+
+fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
+    var handler, var conn = try factory.create();
+    conn.initInstance(allocator, io_loop, handler, socket);
+    handler.onConnect();
+}
+
+pub fn GenericConnector(
+    comptime Factory: type,
+    comptime upgradeFn: *const fn (mem.Allocator, *io.Loop, anytype, posix.socket_t) io.Error!void,
+) type {
     return struct {
         const Self = @This();
 
@@ -401,9 +419,7 @@ pub fn Connector(comptime Factory: type) type {
         }
 
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
-            var handler, var conn = try self.factory.create();
-            conn.initInstance(self.allocator, self.io_loop, handler, socket);
-            handler.onConnect();
+            try upgradeFn(self.allocator, self.io_loop, self.factory, socket);
         }
 
         fn onConnectFail(self: *Self, err: ?anyerror) void {

@@ -8,8 +8,10 @@ const log = std.log.scoped(.main);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // domain from command line argument
     var args_iter = try std.process.argsWithAllocator(allocator);
     defer args_iter.deinit();
     _ = args_iter.next();
@@ -21,69 +23,102 @@ pub fn main() !void {
     defer allocator.free(host);
     const port = 443;
 
+    // tls config
+    var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
+    defer root_ca.deinit(allocator);
+    var diagnostic: io.tls.config.Client.Diagnostic = .{};
+    const config: io.tls.config.Client = .{
+        .host = host,
+        .root_ca = root_ca,
+        .diagnostic = &diagnostic,
+    };
+    const addr = try getAddress(allocator, host_arg, port);
+
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{
         .connect_timeout = .{ .sec = 1, .nsec = 0 },
     });
     defer io_loop.deinit();
 
-    var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
-    defer root_ca.deinit(allocator);
-    const addr = try getAddress(allocator, host_arg, port);
+    var factory = Factory.init(allocator, config);
+    defer factory.deinit();
 
-    var diagnostic: io.tls.config.Client.Diagnostic = .{};
-    const opt: io.tls.config.Client = .{
-        .host = host,
-        .root_ca = root_ca,
-        .diagnostic = &diagnostic,
-        // example of how to get handshake failure, use some really old cipher
-        // .cipher_suites = &[_]io.tls.options.CipherSuite{.RSA_WITH_AES_128_CBC_SHA},
-    };
-    var https: Https = undefined;
-    try https.init(allocator, &io_loop, addr, opt);
-    defer https.deinit();
+    var connector = io.tls.Connector(Factory).init(allocator, &io_loop, &factory, addr);
+    connector.connect();
 
     _ = try io_loop.run();
 
     showDiagnostic(&diagnostic, host_arg);
 }
 
-const Https = struct {
+const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    host: []const u8,
-    tls_cli: io.tls.Client(Self),
+    config: io.tls.config.Client,
+    handler: ?*Https = null,
 
     fn init(
-        self: *Self,
         allocator: mem.Allocator,
-        io_loop: *io.Loop,
-        address: std.net.Address,
-        opt: io.tls.config.Client,
-    ) !void {
-        self.* = .{
+        config: io.tls.config.Client,
+    ) Self {
+        return .{
             .allocator = allocator,
-            .host = opt.host,
-            .tls_cli = undefined,
+            .config = config,
         };
-        try self.tls_cli.init(allocator, io_loop, self, address, opt);
     }
 
     fn deinit(self: *Self) void {
-        self.tls_cli.deinit();
+        if (self.handler) |handler| {
+            handler.deinit();
+            self.allocator.destroy(handler);
+        }
+    }
+
+    pub fn create(self: *Self) !struct { *Https, *Https.Tls } {
+        const handler = try self.allocator.create(Https);
+        errdefer self.allocator.destroy(handler);
+        handler.* = .{
+            .allocator = self.allocator,
+            .host = self.config.host,
+            .tls = undefined,
+        };
+        self.handler = handler;
+        return .{ handler, &handler.tls };
+    }
+
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("connect error {}", .{err});
+    }
+
+    pub fn onClose(_: *Self) void {
+        log.debug("connector closed ", .{});
+        posix.raise(posix.SIG.USR1) catch {};
+    }
+};
+
+const Https = struct {
+    const Self = @This();
+    const Tls = io.tls.Conn(Self, io.tls.config.Client);
+
+    allocator: mem.Allocator,
+    host: []const u8,
+    tls: Tls,
+
+    fn deinit(self: *Self) void {
+        self.tls.deinit();
     }
 
     pub fn onConnect(self: *Self) void {
         self.get() catch |err| {
             self.onError(err);
-            self.tls_cli.close();
+            self.tls.close();
         };
     }
 
     fn get(self: *Self) !void {
         const request = try std.fmt.allocPrint(self.allocator, "GET / HTTP/1.1\r\nHost: {s}\r\n\r\n", .{self.host});
-        try self.tls_cli.send(request);
+        try self.tls.send(request);
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) usize {
@@ -94,7 +129,7 @@ const Https = struct {
             std.mem.trimRight(u8, bytes, "\r\n"),
             "</html>",
         ) or std.ascii.endsWithIgnoreCase(bytes, "\r\n0\r\n\r\n"))
-            self.tls_cli.close();
+            self.tls.close();
 
         return bytes.len;
     }
@@ -114,8 +149,6 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
     const list = try std.net.getAddressList(allocator, host, port);
     defer list.deinit();
     if (list.addrs.len == 0) return error.UnknownHostName;
-    // if (list.addrs.len > 0)
-    //     std.debug.print("list.addrs: {any}\n", .{list.addrs});
     return list.addrs[0];
 }
 

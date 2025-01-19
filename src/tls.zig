@@ -67,11 +67,18 @@ fn LibFacade(comptime T: type) type {
     };
 }
 
-pub fn Client(comptime Handler: type) type {
+// TODO: naming, replace Config with handshake type: client/server (active/passive)
+pub fn Conn(comptime Handler: type, comptime Config: type) type {
+    // TODO: why this check
+    switch (Config) {
+        io.tls.config.Client => {},
+        io.tls.config.Server => {},
+        else => unreachable,
+    }
     return struct {
         const Self = @This();
-        const Tcp = io.tcp.Client(TcpFacade(Self));
-        const Lib = tls.asyn.Client(LibFacade(Self));
+        const Tcp = io.tcp.Conn(TcpFacade(Self));
+        const Lib = tls.asyn.Conn2(LibFacade(Self), Config);
 
         handler: *Handler,
         tcp: Tcp,
@@ -79,25 +86,32 @@ pub fn Client(comptime Handler: type) type {
         tcp_facade: TcpFacade(Self),
         lib_facade: LibFacade(Self),
 
-        pub fn init(
+        fn init(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             handler: *Handler,
-            address: net.Address,
-            config: tls.config.Client,
-        ) !void {
+            socket: posix.socket_t,
+            config: Config,
+        ) io.Error!void {
             self.* = .{
                 .handler = handler,
                 .tcp_facade = .{ .parent = self },
                 .lib_facade = .{ .parent = self, .recv_buf = RecvBuf.init(allocator) },
-                .tcp = Tcp.init(allocator, io_loop, &self.tcp_facade, address),
-                .lib = try Lib.init(allocator, &self.lib_facade, config),
+                .tcp = Tcp.init(allocator, io_loop, &self.tcp_facade),
+                .lib = Lib.init(allocator, &self.lib_facade, config) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => unreachable,
+                },
             };
-        }
-
-        pub fn connect(self: *Self) void {
-            self.tcp.connect();
+            self.tcp.open(socket);
+            // TODO
+            if (Config == io.tls.config.Client) {
+                self.lib.connect() catch |err| {
+                    self.handler.onError(err);
+                    return self.tcp.close();
+                };
+            }
         }
 
         pub fn deinit(self: *Self) void {
@@ -126,58 +140,17 @@ pub fn Client(comptime Handler: type) type {
     };
 }
 
-pub fn Conn(comptime Handler: type) type {
-    return struct {
-        const Self = @This();
-        const Tcp = io.tcp.Conn(TcpFacade(Self));
-        const Lib = tls.asyn.Conn(LibFacade(Self));
+const _tcp = @import("tcp.zig");
 
-        handler: *Handler,
-        tcp: Tcp,
-        lib: Lib,
-        tcp_facade: TcpFacade(Self),
-        lib_facade: LibFacade(Self),
+pub fn Connector(comptime Factory: type) type {
+    return _tcp.GenericConnector(Factory, upgrade);
+}
 
-        pub fn init(
-            self: *Self,
-            allocator: mem.Allocator,
-            io_loop: *io.Loop,
-            handler: *Handler,
-            socket: posix.socket_t,
-            config: tls.config.Server,
-        ) !void {
-            self.* = .{
-                .handler = handler,
-                .tcp_facade = .{ .parent = self },
-                .lib_facade = .{ .parent = self, .recv_buf = RecvBuf.init(allocator) },
-                .tcp = Tcp.init(allocator, io_loop, &self.tcp_facade),
-                .lib = try Lib.init(allocator, &self.lib_facade, config),
-            };
-            self.tcp.connect(socket);
-        }
+pub fn Listener(comptime Factory: type) type {
+    return _tcp.GenericListener(Factory, upgrade);
+}
 
-        pub fn deinit(self: *Self) void {
-            self.lib_facade.recv_buf.free();
-            self.tcp.deinit();
-            self.lib.deinit();
-        }
-
-        fn closeErr(self: *Self, err: anyerror) void {
-            self.handler.onError(err);
-            self.tcp.close();
-        }
-
-        pub fn send(self: *Self, cleartext: []const u8) !void {
-            try self.lib.send(cleartext);
-        }
-
-        pub fn sendZc(self: *Self, cleartext: []const u8) !void {
-            try self.send(cleartext);
-            self.handler.onSend(cleartext);
-        }
-
-        pub fn close(self: *Self) void {
-            self.tcp.close();
-        }
-    };
+fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
+    const handler, var conn = try factory.create();
+    try conn.init(allocator, io_loop, handler, socket, factory.config);
 }
