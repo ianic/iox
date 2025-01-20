@@ -24,25 +24,25 @@ pub fn main() !void {
     var config = try io.ws.Config.fromUri(allocator, uri);
     defer config.deinit(allocator);
 
-    var handler: Handler = .{ .allocator = allocator, .ws = undefined };
+    var handler: Handler = .{ .allocator = allocator };
     defer handler.deinit();
 
     var client: io.ws.Client(Handler) = undefined;
-    client.connect(allocator, &io_loop, &handler, &handler.ws, config);
+    client.connect(allocator, &io_loop, &handler, &handler.conn, config);
 
     _ = try io_loop.run();
 }
 
 const Handler = struct {
     const Self = @This();
-    const Ws = io.ws.Conn(Self);
 
     allocator: mem.Allocator,
-    ws: Ws,
+    conn: ?io.ws.Conn(Self) = null,
     send_len: usize = 1,
 
     fn deinit(self: *Self) void {
-        self.ws.deinit();
+        if (self.conn) |*conn|
+            conn.deinit();
     }
 
     pub fn onConnect(self: *Self) void {
@@ -60,25 +60,32 @@ const Handler = struct {
     fn send(self: *Self) void {
         self.send_() catch |err| {
             log.err("send failed {}", .{err});
-            self.ws.close();
+            const conn = &self.conn.?;
+            conn.close();
         };
     }
 
     fn send_(self: *Self) !void {
-        if (self.send_len >= 1024) {
-            self.ws.close();
-            return;
-        }
+        const conn = &self.conn.?;
+
+        if (self.send_len >= 1024)
+            return conn.close();
 
         self.send_len *= 2;
         const buf = try self.allocator.alloc(u8, self.send_len);
         defer self.allocator.free(buf);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
-        try self.ws.send(.{ .data = buf, .encoding = .binary });
+        try conn.send(.{ .data = buf, .encoding = .binary });
     }
 
-    pub fn onError(_: *Self, err: anyerror) void {
-        log.err("{}", .{err});
+    pub fn onError(self: *Self, err: anyerror) void {
+        if (self.conn == null) {
+            // error while establishing connection
+            log.err("connect failed {}", .{err});
+        } else {
+            // error after the connection was established
+            log.err("{}", .{err});
+        }
     }
 
     pub fn onClose(_: *Self) void {

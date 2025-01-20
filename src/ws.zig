@@ -308,7 +308,7 @@ pub fn Client(Handler: type) type {
 
         config: io.ws.Config,
         handler: *Handler,
-        conn: *Conn(Handler),
+        conn: *?Conn(Handler),
         connector: Connector(Self),
 
         pub fn connect(
@@ -316,7 +316,7 @@ pub fn Client(Handler: type) type {
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             handler: *Handler,
-            conn: *Conn(Handler),
+            conn: *?Conn(Handler),
             config: io.ws.Config,
         ) void {
             self.* = .{
@@ -325,11 +325,13 @@ pub fn Client(Handler: type) type {
                 .handler = handler,
                 .conn = conn,
             };
+            self.conn.* = null;
             self.connector.connect();
         }
 
         pub fn create(self: *Self) !struct { *Handler, *Conn(Handler) } {
-            return .{ self.handler, self.conn };
+            self.conn.* = undefined;
+            return .{ self.handler, &self.conn.*.? };
         }
 
         pub fn onError(self: *Self, err: anyerror) void {
