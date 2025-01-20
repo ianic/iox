@@ -5,19 +5,25 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.tcp);
+const log = std.log.scoped(.ws_client);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // const default_uri = "wss://ws.vi-server.org/mirror/";
+    // const uri = "wss://www.supersport.hr/api/sbk?preSub=dl_hr";
+
+    var args_iter = try std.process.argsWithAllocator(allocator);
+    defer args_iter.deinit();
+    _ = args_iter.next();
+    const uri = args_iter.next() orelse unreachable;
+
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    //const uri = "wss://ws.vi-server.org/mirror/";
-    const uri = "wss://www.supersport.hr/api/sbk?preSub=dl_hr";
     var config = try io.ws.Config.fromUri(allocator, uri);
     defer config.deinit(allocator);
 
@@ -59,6 +65,7 @@ const Factory = struct {
         errdefer self.allocator.destroy(handler);
         handler.* = .{ .ws = undefined };
         self.handler = handler;
+        log.debug("connected to: {s}", .{self.config.uri});
         return .{ handler, &handler.ws };
     }
 
@@ -83,7 +90,7 @@ const Handler = struct {
     }
 
     pub fn onConnect(self: *Self) void {
-        log.debug("{*} connected", .{self});
+        // log.debug("{*} connected", .{self});
         self.ws.send(.{ .data = "iso medo u ducan nije reko dobar dan" }) catch |err| {
             log.err("send {}", .{err});
             self.ws.close();
@@ -91,26 +98,16 @@ const Handler = struct {
     }
 
     pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
-        log.debug("{*} message: {s}", .{ self, msg.data });
-        // self.ws.close();
+        log.debug("received: {s}", .{msg.data});
+        self.ws.close();
     }
 
-    pub fn onError(self: *Self, err: anyerror) void {
-        log.err("{*} {}", .{ self, err });
+    pub fn onError(_: *Self, err: anyerror) void {
+        log.err("{}", .{err});
     }
 
-    pub fn onClose(self: *Self) void {
-        log.debug("{*} closed", .{self});
+    pub fn onClose(_: *Self) void {
+        // log.debug("{*} closed", .{self});
         posix.raise(posix.SIG.USR1) catch {};
     }
 };
-
-fn dhumpStackTrace() void {
-    var address_buffer: [32]usize = undefined;
-    var stack_trace: std.builtin.StackTrace = .{
-        .instruction_addresses = &address_buffer,
-        .index = 0,
-    };
-    std.debug.captureStackTrace(null, &stack_trace);
-    std.debug.dumpStackTrace(stack_trace);
-}

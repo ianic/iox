@@ -38,6 +38,7 @@ pub const ws = struct {
 
     pub const Conn = _ws.Conn;
     pub const Connector = _ws.Connector;
+    pub const Client = _ws.Client;
 };
 
 pub const timer = @import("timer.zig");
@@ -51,3 +52,13 @@ test {
     _ = @import("timer.zig");
     _ = @import("ws.zig");
 }
+
+// fn dhumpStackTrace() void {
+//     var address_buffer: [32]usize = undefined;
+//     var stack_trace: std.builtin.StackTrace = .{
+//         .instruction_addresses = &address_buffer,
+//         .index = 0,
+//     };
+//     std.debug.captureStackTrace(null, &stack_trace);
+//     std.debug.dumpStackTrace(stack_trace);
+// }

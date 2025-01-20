@@ -153,29 +153,23 @@ pub fn Conn(comptime Handler: type) type {
                 .lib_facade = .{ .parent = self },
                 .transport_facade = .{ .parent = self },
                 .lib = Lib.init(allocator, &self.lib_facade, config.uri),
-                .transport = switch (config.scheme) {
-                    .wss => brk: {
-                        const tls_cli = try allocator.create(Tls);
-                        try tls_cli.init(allocator, io_loop, &self.transport_facade, socket, .{
-                            .host = config.host,
-                            .root_ca = config.root_ca.?,
-                        });
-                        break :brk .{ .tls = tls_cli };
-                    },
-                    .ws => brk: {
-                        const tcp_cli = try allocator.create(Tcp);
-                        tcp_cli.initInstance(allocator, io_loop, &self.transport_facade, socket);
-                        break :brk .{ .tcp = tcp_cli };
-                    },
+                .transport = undefined,
+            };
+            switch (config.scheme) {
+                .wss => {
+                    const tls_cli = try allocator.create(Tls);
+                    self.transport = .{ .tls = tls_cli };
+                    try tls_cli.init(allocator, io_loop, &self.transport_facade, socket, .{
+                        .host = config.host,
+                        .root_ca = config.root_ca.?,
+                    });
                 },
-            };
-        }
-
-        fn open(self: *Self) void {
-            self.lib.connect() catch |err| {
-                self.handler.onError(err);
-                self.close();
-            };
+                .ws => {
+                    const tcp_cli = try allocator.create(Tcp);
+                    self.transport = .{ .tcp = tcp_cli };
+                    tcp_cli.init(allocator, io_loop, &self.transport_facade, socket);
+                },
+            }
         }
 
         pub fn deinit(self: *Self) void {
@@ -306,5 +300,44 @@ pub fn Listener(comptime Factory: type) type {
 fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
     const handler, var conn = try factory.create();
     try conn.init(allocator, io_loop, handler, socket, factory.config);
-    conn.open();
+}
+
+pub fn Client(Handler: type) type {
+    return struct {
+        const Self = @This();
+
+        config: io.ws.Config,
+        handler: *Handler,
+        conn: *Conn(Handler),
+        connector: Connector(Self),
+
+        pub fn connect(
+            self: *Self,
+            allocator: mem.Allocator,
+            io_loop: *io.Loop,
+            handler: *Handler,
+            conn: *Conn(Handler),
+            config: io.ws.Config,
+        ) void {
+            self.* = .{
+                .config = config,
+                .connector = Connector(Self).init(allocator, io_loop, self, config.addr),
+                .handler = handler,
+                .conn = conn,
+            };
+            self.connector.connect();
+        }
+
+        pub fn create(self: *Self) !struct { *Handler, *Conn(Handler) } {
+            return .{ self.handler, self.conn };
+        }
+
+        pub fn onError(self: *Self, err: anyerror) void {
+            self.handler.onError(err);
+        }
+
+        pub fn onClose(self: *Self) void {
+            self.handler.onClose();
+        }
+    };
 }

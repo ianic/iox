@@ -37,28 +37,27 @@ pub fn Conn(comptime Handler: type) type {
             closing,
         };
 
-        pub fn init(allocator: mem.Allocator, io_loop: *io.Loop, handler: *Handler) Self {
-            return .{
-                .allocator = allocator,
-                .io_loop = io_loop,
-                .handler = handler,
-                .socket = 0,
-                .state = .closed,
-                .send_list = std.ArrayList(posix.iovec_const).init(allocator),
-                .recv_buf = RecvBuf.init(allocator),
-            };
-        }
-
-        // TODO remove init, rename this to init
-        pub fn initInstance(
+        pub fn init(
             self: *Self,
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             handler: *Handler,
             socket: posix.socket_t,
         ) void {
-            self.* = Self.init(allocator, io_loop, handler);
-            self.open(socket);
+            self.* = .{
+                .allocator = allocator,
+                .io_loop = io_loop,
+                .handler = handler,
+                .socket = socket,
+                .send_list = std.ArrayList(posix.iovec_const).init(allocator),
+                .recv_buf = RecvBuf.init(allocator),
+                .state = .open,
+            };
+            // start multishot receive
+            self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
+            self.io_loop.submit(&self.recv_op);
+
+            handler.onConnect();
         }
 
         pub fn deinit(self: *Self) void {
@@ -67,15 +66,6 @@ pub fn Conn(comptime Handler: type) type {
             self.send_list.deinit();
             self.recv_buf.free();
             self.* = undefined;
-        }
-
-        /// Set connected tcp socket and start multishot receive operation.
-        pub fn open(self: *Self, socket: posix.socket_t) void {
-            self.socket = socket;
-            self.state = .open;
-            // start multishot receive
-            self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
-            self.io_loop.submit(&self.recv_op);
         }
 
         /// Zero copy send it is callers responsibility to ensure lifetime of
@@ -374,9 +364,9 @@ pub fn Connector(comptime Factory: type) type {
 }
 
 fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
-    var handler, var conn = try factory.create();
-    conn.initInstance(allocator, io_loop, handler, socket);
-    handler.onConnect();
+    const handler, var conn = try factory.create();
+    conn.init(allocator, io_loop, handler, socket);
+    //handler.onConnect();
 }
 
 pub fn GenericConnector(

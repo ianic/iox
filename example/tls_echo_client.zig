@@ -5,7 +5,7 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.main);
+const log = std.log.scoped(.client);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -110,7 +110,7 @@ const Handler = struct {
                 self.onError(err);
                 self.tls.close();
             };
-            log.debug("recv {} bytes done", .{bytes.len});
+            log.debug("recv {} bytes", .{bytes.len});
             return bytes.len;
         }
         // log.debug("recv {} bytes waiting for more", .{bytes.len});
@@ -118,7 +118,7 @@ const Handler = struct {
     }
 
     fn send(self: *Self) !void {
-        if (self.send_len > 1024 * 1024 * 128) {
+        if (self.send_len > 1024 * 1024 * 2) {
             self.tls.close();
             return;
         }

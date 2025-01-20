@@ -5,7 +5,7 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 
-const log = std.log.scoped(.tcp);
+const log = std.log.scoped(.server);
 
 // Start server:
 //   $ zig build && zig-out/bin/tcp_echo

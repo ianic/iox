@@ -80,7 +80,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
     return struct {
         const Self = @This();
         const Tcp = io.tcp.Conn(TcpFacade(Self));
-        const Lib = tls.asyn.Conn2(LibFacade(Self), Config);
+        const Lib = tls.asyn.Conn(LibFacade(Self), Config);
 
         handler: *Handler,
         tcp: Tcp,
@@ -100,20 +100,13 @@ pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
                 .handler = handler,
                 .tcp_facade = .{ .parent = self },
                 .lib_facade = .{ .parent = self, .recv_buf = RecvBuf.init(allocator) },
-                .tcp = Tcp.init(allocator, io_loop, &self.tcp_facade),
+                .tcp = undefined,
                 .lib = Lib.init(allocator, &self.lib_facade, config) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => unreachable,
                 },
             };
-            self.tcp.open(socket);
-            if (handshake == .client) {
-                // client is doing active handshake, server passive
-                self.lib.connect() catch |err| {
-                    self.handler.onError(err);
-                    return self.tcp.close();
-                };
-            }
+            self.tcp.init(allocator, io_loop, &self.tcp_facade, socket);
         }
 
         pub fn deinit(self: *Self) void {

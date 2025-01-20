@@ -4,7 +4,7 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 
-const log = std.log.scoped(.main);
+const log = std.log.scoped(.client);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -118,6 +118,7 @@ const Https = struct {
 
     fn get(self: *Self) !void {
         const request = try std.fmt.allocPrint(self.allocator, "GET / HTTP/1.1\r\nHost: {s}\r\n\r\n", .{self.host});
+        defer self.allocator.free(request);
         try self.tls.send(request);
     }
 

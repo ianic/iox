@@ -5,7 +5,7 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 
-const log = std.log.scoped(.main);
+const log = std.log.scoped(.client);
 pub const std_options = std.Options{ .log_level = .debug };
 
 pub fn main() !void {
@@ -88,7 +88,7 @@ const Handler = struct {
         if (bytes.len == self.send_len) {
             for (0..bytes.len) |i| assert(bytes[i] == @as(u8, @intCast(i % 256)));
             self.send();
-            log.debug("recv {} bytes done", .{bytes.len});
+            log.debug("recv {} bytes", .{bytes.len});
             return bytes.len;
         }
         // log.debug("recv {} bytes waiting for more", .{bytes.len});

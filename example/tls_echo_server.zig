@@ -6,7 +6,7 @@ const posix = std.posix;
 const assert = std.debug.assert;
 const InstanceMap = @import("tcp_echo_server.zig").InstanceMap;
 
-const log = std.log.scoped(.tcp);
+const log = std.log.scoped(.server);
 
 // Start server:
 //   $ zig build && zig-out/bin/tcp_echo
