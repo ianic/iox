@@ -12,13 +12,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // const default_uri = "wss://ws.vi-server.org/mirror/";
-    // const uri = "wss://www.supersport.hr/api/sbk?preSub=dl_hr";
+    //const uri = "wss://ws.vi-server.org/mirror/";
+    const uri = "wss://www.supersport.hr/api/sbk?preSub=dl_hr";
 
-    var args_iter = try std.process.argsWithAllocator(allocator);
-    defer args_iter.deinit();
-    _ = args_iter.next();
-    const uri = args_iter.next() orelse unreachable;
+    // var args_iter = try std.process.argsWithAllocator(allocator);
+    // defer args_iter.deinit();
+    // _ = args_iter.next();
+    // const uri = args_iter.next() orelse unreachable;
 
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{});
@@ -90,16 +90,16 @@ const Handler = struct {
     }
 
     pub fn onConnect(self: *Self) void {
-        // log.debug("{*} connected", .{self});
-        self.ws.send(.{ .data = "iso medo u ducan nije reko dobar dan" }) catch |err| {
-            log.err("send {}", .{err});
-            self.ws.close();
-        };
+        log.debug("{*} connected", .{self});
+        // self.ws.send(.{ .data = "iso medo u ducan nije reko dobar dan" }) catch |err| {
+        //     log.err("send {}", .{err});
+        //     self.ws.close();
+        // };
     }
 
-    pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
+    pub fn onRecv(_: *Self, msg: io.ws.Msg) void {
         log.debug("received: {s}", .{msg.data});
-        self.ws.close();
+        // self.ws.close();
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
