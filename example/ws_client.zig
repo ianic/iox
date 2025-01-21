@@ -81,7 +81,7 @@ const Factory = struct {
 
 const Handler = struct {
     const Self = @This();
-    const Ws = io.ws.Conn(Self);
+    const Ws = io.ws.Conn(Self, .client);
 
     ws: Ws,
 

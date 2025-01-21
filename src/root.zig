@@ -38,6 +38,7 @@ pub const ws = struct {
 
     pub const Conn = _ws.Conn;
     pub const Connector = _ws.Connector;
+    pub const Listener = _ws.Listener;
     pub const Client = _ws.Client;
 };
 

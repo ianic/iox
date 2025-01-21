@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
         "ws_client",
         "ws_autobahn_client",
         "ws_echo_client",
+        "ws_echo_server",
     };
     inline for (examples) |path| {
         const source_file = "example/" ++ path ++ ".zig";

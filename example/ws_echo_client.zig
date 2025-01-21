@@ -37,7 +37,7 @@ const Handler = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    conn: ?io.ws.Conn(Self) = null,
+    conn: ?io.ws.Conn(Self, .client) = null,
     send_len: usize = 1,
 
     fn deinit(self: *Self) void {

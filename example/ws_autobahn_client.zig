@@ -107,7 +107,7 @@ const Client = struct {
 
 const Handler = struct {
     const Self = @This();
-    const Ws = io.ws.Conn(Self);
+    const Ws = io.ws.Conn(Self, .client);
 
     ws: Ws,
 
@@ -115,8 +115,8 @@ const Handler = struct {
         self.ws.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
-        log.debug("{*} connected", .{self});
+    pub fn onConnect(_: *Self) void {
+        // log.debug("{*} connected", .{self});
     }
 
     pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
@@ -131,7 +131,7 @@ const Handler = struct {
         log.err("{*} {}", .{ self, err });
     }
 
-    pub fn onClose(self: *Self) void {
-        log.debug("{*} closed", .{self});
+    pub fn onClose(_: *Self) void {
+        //log.debug("{*} closed", .{self});
     }
 };

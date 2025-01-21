@@ -36,15 +36,20 @@ test {
     }
 }
 
+const HandshakeKind = @import("tls.zig").HandshakeKind;
+
 /// Handler: upstream application handler, required event handler methods
 /// defined above.
-pub fn Conn(comptime Handler: type) type {
+pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
     return struct {
         const Self = @This();
 
         const Tcp = io.tcp.Conn(TransportFacade);
         const Tls = io.tls.Conn(TransportFacade, .client);
-        const Lib = ws.asyn.Client(LibFacade);
+        const Lib = switch (handshake) {
+            .client => ws.asyn.Client(LibFacade),
+            .server => ws.asyn.Server(LibFacade),
+        };
 
         // Downstream transport protocol interface
         const Transport = union(enum) {
@@ -308,7 +313,7 @@ pub fn Client(Handler: type) type {
 
         config: io.ws.Config,
         handler: *Handler,
-        conn: *?Conn(Handler),
+        conn: *?Conn(Handler, .client),
         connector: Connector(Self),
 
         pub fn connect(
@@ -316,7 +321,7 @@ pub fn Client(Handler: type) type {
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             handler: *Handler,
-            conn: *?Conn(Handler),
+            conn: *?Conn(Handler, .client),
             config: io.ws.Config,
         ) void {
             self.* = .{
@@ -329,7 +334,7 @@ pub fn Client(Handler: type) type {
             self.connector.connect();
         }
 
-        pub fn create(self: *Self) !struct { *Handler, *Conn(Handler) } {
+        pub fn create(self: *Self) !struct { *Handler, *Conn(Handler, .client) } {
             self.conn.* = undefined;
             return .{ self.handler, &self.conn.*.? };
         }
