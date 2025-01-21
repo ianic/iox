@@ -171,6 +171,7 @@ pub fn Conn(comptime Handler: type) type {
         }
 
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
+            if (self.state == .closing) return;
             const buf = try self.recv_buf.append(bytes);
             const n = self.handler.onRecv(buf);
             self.recv_buf.set(buf[n..]) catch |err| {
@@ -366,7 +367,6 @@ pub fn Connector(comptime Factory: type) type {
 fn upgrade(allocator: mem.Allocator, io_loop: *io.Loop, factory: anytype, socket: posix.socket_t) io.Error!void {
     const handler, var conn = try factory.create();
     conn.init(allocator, io_loop, handler, socket);
-    //handler.onConnect();
 }
 
 pub fn GenericConnector(
