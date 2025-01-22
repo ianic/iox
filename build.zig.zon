@@ -53,14 +53,12 @@
         //    .lazy = false,
         //},
         .tls = .{
-            // .url = "https://github.com/ianic/tls.zig/archive/7197a45bfb5002ca78bb92f7554e533e98e0f362.tar.gz",
-            // .hash = "12201a532b2b153e58839059761d0d2e2aabb80398207a999d1e51c2c4b414de22d8",
-            .path = "../tls.zig/",
+            .url = "https://github.com/ianic/tls.zig/archive/d4782f553212f6294a012722cf1603a4a8432544.tar.gz",
+            .hash = "1220c0a911c6dd74912debac30e4cab6098d8a3102e131df9a347fca85cf1848fc4d",
         },
         .ws = .{
-            //.url = "https://github.com/ianic/websocket.zig/archive/c1b14c166befd7ede8f60d9ee7f30a2f2b60fc49.tar.gz",
-            //.hash = "1220666cad728c586c0c3da673abe5c6755e9db389872645da678327863dc16fb40a",
-            .path = "../websocket.zig/",
+            .url = "https://github.com/ianic/websocket.zig/archive/72d1b0f425365f2a23ae213048185df6bf5a2a9e.tar.gz",
+            .hash = "122037c4dd156d43b12024ad9d1a045727c53a6c42807daaab92bf95006587a8269b",
         },
     },
 
