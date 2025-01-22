@@ -213,6 +213,15 @@ test "parse uri" {
         try testing.expectEqual(443, conf.port);
         try testing.expectEqualStrings("ws.vi-server.org", conf.host);
     }
+    {
+        const url = "wss://localhost:9003";
+        var conf = try config.Client.fromUri(allocator, url);
+        defer conf.deinit(allocator);
+
+        try testing.expectEqual(.wss, conf.scheme);
+        try testing.expectEqual(9003, conf.port);
+        try testing.expectEqualStrings("localhost", conf.host);
+    }
 }
 
 pub const config = struct {
@@ -283,6 +292,21 @@ pub const config = struct {
         scheme: Scheme,
         uri: []const u8,
         tls: ?io.tls.config.Server = null,
+
+        pub fn fromUri(uri: []const u8) !Server {
+            const parsed = try std.Uri.parse(uri);
+            const scheme: Scheme = if (mem.eql(u8, "ws", parsed.scheme))
+                .ws
+            else if (mem.eql(u8, "wss", parsed.scheme))
+                .wss
+            else
+                return error.UnknownScheme;
+            return .{
+                .scheme = scheme,
+                .uri = uri,
+                .tls = null,
+            };
+        }
     };
 };
 

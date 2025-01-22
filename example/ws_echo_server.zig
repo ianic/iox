@@ -25,6 +25,23 @@ pub fn main() !void {
 
     var listener = io.ws.Listener(Factory).init(allocator, &io_loop, &factory);
     try listener.bind(addr);
+
+    // Use certs from tls.zig project
+    const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
+    // Load server certificate key pair
+    var auth = try io.tls.config.CertKeyPair.load(allocator, dir, "localhost_ec/cert.pem", "localhost_ec/key.pem");
+    defer auth.deinit(allocator);
+    var wss_config = try io.ws.config.Server.fromUri("wss://localhost:9003");
+    wss_config.tls = .{ .auth = &auth };
+
+    const wss_addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9003);
+
+    var wss_factory = Factory.init(allocator, wss_config);
+    defer wss_factory.deinit();
+
+    var wss_listener = io.ws.Listener(Factory).init(allocator, &io_loop, &wss_factory);
+    try wss_listener.bind(wss_addr);
+
     _ = try io_loop.run();
 }
 
@@ -54,6 +71,7 @@ const Factory = struct {
             .parent = self,
             .ws = undefined,
         };
+        log.debug("connected to {s}", .{self.config.uri});
         return .{ handler, &handler.ws };
     }
 
@@ -62,7 +80,7 @@ const Factory = struct {
     }
 
     pub fn onClose(_: *Self) void {
-        log.debug("listener closed ", .{});
+        // log.debug("listener closed ", .{});
     }
 };
 
@@ -77,12 +95,12 @@ const Handler = struct {
         self.ws.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
-        log.debug("{*} connected", .{self});
+    pub fn onConnect(_: *Self) void {
+        // log.debug("{*} connected", .{self});
     }
 
     pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
-        log.debug("{*} onRecv {} bytes", .{ self, msg.data.len });
+        // log.debug("{*} onRecv {} bytes", .{ self, msg.data.len });
         self.ws.send(msg) catch |err| {
             log.err("{*} send {}", .{ self, err });
             self.ws.close();
@@ -90,7 +108,7 @@ const Handler = struct {
     }
 
     pub fn onClose(self: *Self) void {
-        log.debug("{*} closed", .{self});
+        // log.debug("{*} closed", .{self});
         self.deinit();
         self.parent.handlers.destroy(self);
     }

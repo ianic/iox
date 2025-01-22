@@ -26,6 +26,8 @@ pub fn main() !void {
     defer config.deinit(allocator);
     // tls config
     var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
+    const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
+    try root_ca.bundle.addCertsFromFilePath(allocator, dir, "minica.pem");
     defer root_ca.deinit(allocator);
     config.tls = .{ .host = config.host, .root_ca = root_ca };
 
@@ -51,6 +53,7 @@ const Handler = struct {
     }
 
     pub fn onConnect(self: *Self) void {
+        // log.debug("{*} onConnect", .{self});
         self.send();
     }
 
