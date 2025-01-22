@@ -20,12 +20,18 @@ pub fn main() !void {
     // _ = args_iter.next();
     // const uri = args_iter.next() orelse unreachable;
 
+    // ws config
+    var config = try io.ws.config.Client.fromUri(allocator, uri);
+    defer config.deinit(allocator);
+
+    // tls config
+    var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
+    defer root_ca.deinit(allocator);
+    config.tls = .{ .host = config.host, .root_ca = root_ca };
+
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
-
-    var config = try io.ws.Config.fromUri(allocator, uri);
-    defer config.deinit(allocator);
 
     var factory = Factory.init(allocator, config);
     defer factory.deinit();
@@ -40,12 +46,12 @@ const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    config: io.ws.Config,
+    config: io.ws.config.Client,
     handler: ?*Handler = null,
 
     fn init(
         allocator: mem.Allocator,
-        config: io.ws.Config,
+        config: io.ws.config.Client,
     ) Self {
         return .{
             .allocator = allocator,

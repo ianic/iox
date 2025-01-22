@@ -21,8 +21,13 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var config = try io.ws.Config.fromUri(allocator, uri);
+    // ws config
+    var config = try io.ws.config.Client.fromUri(allocator, uri);
     defer config.deinit(allocator);
+    // tls config
+    var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
+    defer root_ca.deinit(allocator);
+    config.tls = .{ .host = config.host, .root_ca = root_ca };
 
     var handler: Handler = .{ .allocator = allocator };
     defer handler.deinit();

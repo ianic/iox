@@ -34,7 +34,7 @@ pub const ws = struct {
     const _lib = @import("ws");
 
     pub const Msg = _lib.Msg;
-    pub const Config = _ws.Config;
+    pub const config = _ws.config;
 
     pub const Conn = _ws.Conn;
     pub const Connector = _ws.Connector;

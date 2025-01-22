@@ -22,17 +22,18 @@ test {
         defer io_loop.deinit();
 
         var handler: Handler = .{};
-        var ws_cli: Conn(Handler) = undefined;
-        try ws_cli.init(testing.allocator, &io_loop, &handler, 0, Config.empty);
+        var ws_cli: Conn(Handler, .client) = undefined;
+        try ws_cli.init(testing.allocator, &io_loop, &handler, 0, config.Client.empty);
         defer ws_cli.deinit();
     }
     { // note about type sizes
-        try testing.expectEqual(216, @sizeOf(Conn(Handler)));
-        try testing.expectEqual(160, @sizeOf(Conn(Handler).Lib));
-        try testing.expectEqual(376, @sizeOf(Conn(Handler).Tcp));
-        try testing.expectEqual(680, @sizeOf(Conn(Handler).Tls));
-        try testing.expectEqual(208, @sizeOf(Config));
-        try testing.expectEqual(16, @sizeOf(Conn(Handler).Transport));
+        try testing.expectEqual(224, @sizeOf(Conn(Handler, .client)));
+        try testing.expectEqual(168, @sizeOf(Conn(Handler, .client).Lib));
+        try testing.expectEqual(376, @sizeOf(Conn(Handler, .client).Tcp));
+        try testing.expectEqual(680, @sizeOf(Conn(Handler, .client).Tls));
+        try testing.expectEqual(288, @sizeOf(config.Client));
+        try testing.expectEqual(104, @sizeOf(config.Server));
+        try testing.expectEqual(16, @sizeOf(Conn(Handler, .client).Transport));
     }
 }
 
@@ -41,11 +42,15 @@ const HandshakeKind = @import("tls.zig").HandshakeKind;
 /// Handler: upstream application handler, required event handler methods
 /// defined above.
 pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
+    const Config = switch (handshake) {
+        .client => config.Client,
+        .server => config.Server,
+    };
     return struct {
         const Self = @This();
 
         const Tcp = io.tcp.Conn(TransportFacade);
-        const Tls = io.tls.Conn(TransportFacade, .client);
+        const Tls = io.tls.Conn(TransportFacade, handshake);
         const Lib = switch (handshake) {
             .client => ws.asyn.Client(LibFacade),
             .server => ws.asyn.Server(LibFacade),
@@ -150,24 +155,21 @@ pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
             io_loop: *io.Loop,
             handler: *Handler,
             socket: posix.socket_t,
-            config: Config,
+            conf: Config,
         ) !void {
             self.* = .{
                 .allocator = allocator,
                 .handler = handler,
                 .lib_facade = .{ .parent = self },
                 .transport_facade = .{ .parent = self },
-                .lib = Lib.init(allocator, &self.lib_facade, config.uri),
+                .lib = Lib.init(allocator, &self.lib_facade, conf.uri),
                 .transport = undefined,
             };
-            switch (config.scheme) {
+            switch (conf.scheme) {
                 .wss => {
                     const tls_cli = try allocator.create(Tls);
                     self.transport = .{ .tls = tls_cli };
-                    try tls_cli.init(allocator, io_loop, &self.transport_facade, socket, .{
-                        .host = config.host,
-                        .root_ca = config.root_ca.?,
-                    });
+                    try tls_cli.init(allocator, io_loop, &self.transport_facade, socket, conf.tls.?);
                 },
                 .ws => {
                     const tcp_cli = try allocator.create(Tcp);
@@ -197,91 +199,92 @@ test "parse uri" {
     const allocator = testing.allocator;
     {
         const url = "ws://supersport.hr";
-        var config = try Config.fromUri(allocator, url);
-        defer config.deinit(allocator);
+        var conf = try config.Client.fromUri(allocator, url);
+        defer conf.deinit(allocator);
 
-        try testing.expectEqual(.ws, config.scheme);
-        try testing.expectEqual(80, config.port);
-        try testing.expectEqualStrings("supersport.hr", config.host);
+        try testing.expectEqual(.ws, conf.scheme);
+        try testing.expectEqual(80, conf.port);
+        try testing.expectEqualStrings("supersport.hr", conf.host);
     }
     {
         const url = "wss://ws.vi-server.org/mirror/";
-        var config = try Config.fromUri(allocator, url);
-        defer config.deinit(allocator);
+        var conf = try config.Client.fromUri(allocator, url);
+        defer conf.deinit(allocator);
 
-        try testing.expectEqual(.wss, config.scheme);
-        try testing.expectEqual(443, config.port);
-        try testing.expectEqualStrings("ws.vi-server.org", config.host);
+        try testing.expectEqual(.wss, conf.scheme);
+        try testing.expectEqual(443, conf.port);
+        try testing.expectEqualStrings("ws.vi-server.org", conf.host);
     }
 }
 
-pub const Config = struct {
-    const Scheme = enum {
+pub const config = struct {
+    pub const Scheme = enum {
         ws,
         wss,
     };
+    pub const Client = struct {
+        const Self = @This();
 
-    scheme: Scheme,
-    uri: []const u8,
-    host: []const u8,
-    port: u16,
-    addr: net.Address,
-    root_ca: ?io.tls.config.CertBundle = null,
+        scheme: Scheme,
+        uri: []const u8,
+        host: []const u8,
+        port: u16,
+        addr: net.Address,
+        tls: ?io.tls.config.Client = null,
 
-    pub fn deinit(self: *Config, allocator: mem.Allocator) void {
-        if (self.root_ca) |*root_ca| root_ca.deinit(allocator);
-        allocator.free(self.host);
-        allocator.free(self.uri);
-    }
+        pub fn deinit(self: *Self, allocator: mem.Allocator) void {
+            allocator.free(self.host);
+            allocator.free(self.uri);
+        }
 
-    pub fn fromUri(allocator: mem.Allocator, text: []const u8) !Config {
-        const parsed = try std.Uri.parse(text);
-        const scheme: Scheme = if (mem.eql(u8, "ws", parsed.scheme))
-            .ws
-        else if (mem.eql(u8, "wss", parsed.scheme))
-            .wss
-        else
-            return error.UnknownScheme;
+        pub fn fromUri(allocator: mem.Allocator, text: []const u8) !Self {
+            const parsed = try std.Uri.parse(text);
+            const scheme: Scheme = if (mem.eql(u8, "ws", parsed.scheme))
+                .ws
+            else if (mem.eql(u8, "wss", parsed.scheme))
+                .wss
+            else
+                return error.UnknownScheme;
 
-        const uri_host = if (parsed.host) |host| switch (host) {
-            .percent_encoded => |v| v,
-            .raw => |v| v,
-        } else return error.HostNotFound;
-        const host = try allocator.dupe(u8, uri_host);
-        errdefer allocator.free(host);
+            const uri_host = if (parsed.host) |host| switch (host) {
+                .percent_encoded => |v| v,
+                .raw => |v| v,
+            } else return error.HostNotFound;
+            const host = try allocator.dupe(u8, uri_host);
+            errdefer allocator.free(host);
 
-        const port: u16 = if (parsed.port) |port| port else switch (scheme) {
-            .ws => 80,
-            .wss => 443,
+            const port: u16 = if (parsed.port) |port| port else switch (scheme) {
+                .ws => 80,
+                .wss => 443,
+            };
+
+            const addr = try getAddress(allocator, host, port);
+
+            const uri = try allocator.dupe(u8, text);
+            errdefer allocator.free(uri);
+
+            return .{
+                .uri = uri,
+                .scheme = scheme,
+                .host = host,
+                .port = port,
+                .addr = addr,
+            };
+        }
+
+        const empty = Self{
+            .scheme = .ws,
+            .host = &.{},
+            .uri = &.{},
+            .port = 0,
+            .addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0),
         };
+    };
 
-        const addr = try getAddress(allocator, host, port);
-
-        var root_ca = if (scheme == .wss)
-            try io.tls.config.CertBundle.fromSystem(allocator)
-        else
-            null;
-        errdefer if (root_ca) |*ca| ca.deinit(allocator);
-
-        const uri = try allocator.dupe(u8, text);
-        errdefer allocator.free(uri);
-
-        return .{
-            .uri = uri,
-            .scheme = scheme,
-            .host = host,
-            .port = port,
-            .root_ca = root_ca,
-            .addr = addr,
-        };
-    }
-
-    const empty = Config{
-        .scheme = .ws,
-        .host = &.{},
-        .uri = &.{},
-        .port = 0,
-        .addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0),
+    pub const Server = struct {
+        scheme: Scheme,
+        uri: []const u8,
+        tls: ?io.tls.config.Server = null,
     };
 };
 
@@ -311,7 +314,7 @@ pub fn Client(Handler: type) type {
     return struct {
         const Self = @This();
 
-        config: io.ws.Config,
+        config: config.Client,
         handler: *Handler,
         conn: *?Conn(Handler, .client),
         connector: Connector(Self),
@@ -322,11 +325,11 @@ pub fn Client(Handler: type) type {
             io_loop: *io.Loop,
             handler: *Handler,
             conn: *?Conn(Handler, .client),
-            config: io.ws.Config,
+            conf: config.Client,
         ) void {
             self.* = .{
-                .config = config,
-                .connector = Connector(Self).init(allocator, io_loop, self, config.addr),
+                .config = conf,
+                .connector = Connector(Self).init(allocator, io_loop, self, conf.addr),
                 .handler = handler,
                 .conn = conn,
             };

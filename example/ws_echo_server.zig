@@ -17,15 +17,14 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var config = try io.ws.Config.fromUri(allocator, "ws://localhost:9002");
-    defer config.deinit(allocator);
+    const config = io.ws.config.Server{ .scheme = .ws, .uri = "ws://localhost:9002" };
+    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9002);
+
     var factory = Factory.init(allocator, config);
     defer factory.deinit();
 
     var listener = io.ws.Listener(Factory).init(allocator, &io_loop, &factory);
-    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9002);
     try listener.bind(addr);
-
     _ = try io_loop.run();
 }
 
@@ -33,10 +32,10 @@ const Factory = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    config: io.ws.Config,
+    config: io.ws.config.Server,
     handlers: InstanceMap(Handler),
 
-    fn init(allocator: mem.Allocator, config: io.ws.Config) Self {
+    fn init(allocator: mem.Allocator, config: io.ws.config.Server) Self {
         return .{
             .allocator = allocator,
             .config = config,

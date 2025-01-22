@@ -34,7 +34,7 @@ pub fn main() !void {
     while (case_no <= cases_count) : (case_no += 1) {
         const idx = case_no - 1;
 
-        const config = io.ws.Config{
+        const config = io.ws.config.Client{
             .scheme = .ws,
             .host = try allocator.dupe(u8, hostname),
             .port = port,
@@ -62,7 +62,7 @@ const Client = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    config: io.ws.Config,
+    config: io.ws.config.Client,
     handler: ?*Handler = null,
     connector: io.ws.Connector(Self),
 
@@ -70,7 +70,7 @@ const Client = struct {
         self: *Self,
         allocator: mem.Allocator,
         io_loop: *io.Loop,
-        config: io.ws.Config,
+        config: io.ws.config.Client,
     ) void {
         self.* = .{
             .allocator = allocator,
