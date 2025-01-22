@@ -5,6 +5,11 @@ pub const Op = io.Op;
 pub const Error = io.Error;
 pub const Options = io.Options;
 
+pub const HandshakeKind = enum {
+    client,
+    server,
+};
+
 pub const tcp = struct {
     const _tcp = @import("tcp.zig");
 

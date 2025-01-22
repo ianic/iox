@@ -37,11 +37,9 @@ test {
     }
 }
 
-const HandshakeKind = @import("tls.zig").HandshakeKind;
-
 /// Handler: upstream application handler, required event handler methods
 /// defined above.
-pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
+pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
     const Config = switch (handshake) {
         .client => config.Client,
         .server => config.Server,

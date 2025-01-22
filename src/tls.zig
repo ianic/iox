@@ -67,12 +67,7 @@ fn LibFacade(comptime T: type) type {
     };
 }
 
-pub const HandshakeKind = enum {
-    client,
-    server,
-};
-
-pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
+pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
     const Config = switch (handshake) {
         .client => io.tls.config.Client,
         .server => io.tls.config.Server,
@@ -80,7 +75,10 @@ pub fn Conn(comptime Handler: type, comptime handshake: HandshakeKind) type {
     return struct {
         const Self = @This();
         const Tcp = io.tcp.Conn(TcpFacade(Self));
-        const Lib = tls.asyn.Conn(LibFacade(Self), Config);
+        const Lib = switch (handshake) {
+            .client => tls.asyn.Client(LibFacade(Self)),
+            .server => tls.asyn.Server(LibFacade(Self)),
+        };
 
         handler: *Handler,
         tcp: Tcp,
