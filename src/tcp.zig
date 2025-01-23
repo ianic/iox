@@ -52,6 +52,12 @@ pub fn Conn(comptime Handler: type) type {
                 .send_list = std.ArrayList(posix.iovec_const).init(allocator),
                 .recv_buf = RecvBuf.init(allocator),
                 .state = .open,
+
+                .close_op = .{},
+                .recv_op = .{},
+                .send_op = .{},
+                .send_iov = &.{},
+                .send_msghdr = .{ .iov = undefined, .iovlen = 0, .name = null, .namelen = 0, .control = null, .controllen = 0, .flags = 0 },
             };
             // start multishot receive
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
@@ -61,6 +67,7 @@ pub fn Conn(comptime Handler: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            assert(!self.recv_op.active() and !self.send_op.active() and !self.close_op.active());
             self.freeBuffers();
             self.allocator.free(self.send_iov);
             self.send_list.deinit();
@@ -398,8 +405,7 @@ pub fn GenericConnector(
         }
 
         pub fn connect(self: *Self) void {
-            assert(!self.connect_op.active() and !self.close_op.active());
-
+            if (self.connect_op.active() or self.close_op.active()) return;
             self.connect_op = io.Op.connect(
                 .{ .addr = &self.address },
                 self,
@@ -433,6 +439,50 @@ pub fn GenericConnector(
                 return;
 
             self.factory.onClose();
+        }
+    };
+}
+
+pub fn Client(Handler: type) type {
+    return struct {
+        const Self = @This();
+
+        handler: *Handler,
+        conn: *?Conn(Handler),
+        connector: Connector(Self),
+
+        pub fn connect(
+            self: *Self,
+            allocator: mem.Allocator,
+            io_loop: *io.Loop,
+            handler: *Handler,
+            conn: *?Conn(Handler),
+            addr: net.Address,
+        ) void {
+            self.* = .{
+                .connector = Connector(Self).init(allocator, io_loop, self, addr),
+                .handler = handler,
+                .conn = conn,
+            };
+            self.conn.* = null;
+            self.connector.connect();
+        }
+
+        pub fn reconnect(self: *Self) void {
+            self.connector.connect();
+        }
+
+        pub fn create(self: *Self) !struct { *Handler, *Conn(Handler) } {
+            self.conn.* = undefined;
+            return .{ self.handler, &self.conn.*.? };
+        }
+
+        pub fn onError(self: *Self, err: anyerror) void {
+            self.handler.onError(err);
+        }
+
+        pub fn onClose(self: *Self) void {
+            self.handler.onClose();
         }
     };
 }

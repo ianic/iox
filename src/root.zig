@@ -16,6 +16,7 @@ pub const tcp = struct {
     pub const Conn = _tcp.Conn;
     pub const Listener = _tcp.Listener;
     pub const Connector = _tcp.Connector;
+    pub const Client = _tcp.Client;
 };
 
 pub const udp = struct {
