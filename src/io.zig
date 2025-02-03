@@ -138,6 +138,10 @@ pub const Loop = struct {
     /// Run the loop once.
     pub fn tick(self: *Loop) !void {
         self.metric.loops.inc(1);
+
+        const next_ts = self.timer_queue.next();
+        if (next_ts != timer.infinite) self.loop_timer.set(next_ts);
+
         // Submit prepared sqe-s to the kernel.
         _ = try self.ring.submit();
         // Prepare pending operations
@@ -145,9 +149,6 @@ pub const Loop = struct {
             try op.prep(self);
             _ = self.pending.pop();
         }
-
-        const next_ts = self.timer_queue.next();
-        if (next_ts != timer.infinite) self.loop_timer.set(next_ts);
 
         if (self.cqe_buf_head >= self.cqe_buf_tail) {
             // Get completions.

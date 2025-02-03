@@ -67,7 +67,6 @@ pub fn Conn(comptime Handler: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            assert(!self.recv_op.active() and !self.send_op.active() and !self.close_op.active());
             self.freeBuffers();
             self.allocator.free(self.send_iov);
             self.send_list.deinit();
