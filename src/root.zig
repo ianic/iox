@@ -60,7 +60,7 @@ test {
     _ = @import("ws.zig");
 }
 
-// fn dhumpStackTrace() void {
+// fn dumpStackTrace() void {
 //     var address_buffer: [32]usize = undefined;
 //     var stack_trace: std.builtin.StackTrace = .{
 //         .instruction_addresses = &address_buffer,
