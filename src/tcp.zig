@@ -513,20 +513,26 @@ pub fn Conn2(comptime Handler: type) type {
 
         timer_op: ?timer.Op = null,
         address: ?net.Address = null,
-        reconnects: struct {
-            enabled: bool = true,
-            // Number of reconnects.
-            count: usize = 0,
-            // Current delay.
-            delay: u32 = 0,
-            // First reconnect is immediately after disconnect, after that delay
-            // is doubled to reach max delay in this number of steps.
-            steps_to_max: u4 = 5,
-            // Maximum reconnect delay.
-            delay_max: u32 = 1000,
-        } = .{},
-        recv_idle_timeout: u32 = 2000, // ms
+        options: Options = .{},
+        reconnect_count: usize = 0,
+        reconnect_delay: u32 = 0,
         recv_count: usize = 0,
+
+        pub const Options = struct {
+            reconnect: struct {
+                enabled: bool = false,
+                /// First reconnect try is immediately (0 delay), after that
+                /// delay is doubled each time to reach max delay in this number
+                /// of steps.
+                steps_to_max: u4 = 5,
+                /// Maximum reconnect delay.
+                max_delay: u32 = 1000,
+            } = .{},
+            /// If there is no bytes received for this duration (in
+            /// milliseconds) onRecvTimout callback will be called (if that
+            /// method is defined in Handler).
+            recv_idle_timeout: u32 = 60_000,
+        };
 
         const State = enum {
             closed,
@@ -535,8 +541,12 @@ pub fn Conn2(comptime Handler: type) type {
             closing,
         };
 
-        pub fn init(io_loop: *io.Loop, handler: *Handler) Self {
-            return .{ .io_loop = io_loop, .handler = handler };
+        pub fn init(io_loop: *io.Loop, handler: *Handler, options: Options) Self {
+            return .{
+                .io_loop = io_loop,
+                .handler = handler,
+                .options = options,
+            };
         }
 
         pub fn accept(self: *Self, socket: posix.socket_t) void {
@@ -547,8 +557,8 @@ pub fn Conn2(comptime Handler: type) type {
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
             self.io_loop.submit(&self.recv_op);
             if (@hasDecl(Handler, "onConnect")) self.handler.onConnect();
-            if (@hasDecl(Handler, "onRecvTimeout") and self.recv_idle_timeout > 0)
-                self.setTimer(self.recv_idle_timeout) catch {};
+            if (@hasDecl(Handler, "onRecvTimeout") and self.options.recv_idle_timeout > 0)
+                self.setTimer(self.options.recv_idle_timeout) catch {};
         }
 
         pub fn connect(self: *Self, address: net.Address) void {
@@ -571,20 +581,20 @@ pub fn Conn2(comptime Handler: type) type {
         }
 
         fn scheduleReconnect(self: *Self) void {
-            if (self.reconnects.count > 0) {
-                self.reconnects.delay = @min(
+            if (self.reconnect_count > 0) {
+                self.reconnect_delay = @min(
                     @max(
                         1,
-                        self.reconnects.delay_max / (@as(u16, 1) << self.reconnects.steps_to_max),
-                        self.reconnects.delay * 2,
+                        self.options.reconnect.max_delay / (@as(u16, 1) << self.options.reconnect.steps_to_max),
+                        self.reconnect_delay * 2,
                     ),
-                    self.reconnects.delay_max,
+                    self.options.reconnect.max_delay,
                 );
             }
-            self.reconnects.count += 1;
-            if (self.reconnects.delay == 0)
+            self.reconnect_count += 1;
+            if (self.reconnect_delay == 0)
                 return self.reconnect();
-            self.setTimer(self.reconnects.delay) catch {
+            self.setTimer(self.reconnect_delay) catch {
                 self.reconnect();
             };
         }
@@ -604,8 +614,8 @@ pub fn Conn2(comptime Handler: type) type {
                     if (self.recv_count == 0 and @hasDecl(Handler, "onRecvTimeout"))
                         self.handler.onRecvTimeout();
                     self.recv_count = 0;
-                    if (self.recv_idle_timeout > 0)
-                        return self.io_loop.tsFromDelay(self.recv_idle_timeout);
+                    if (self.options.recv_idle_timeout > 0)
+                        return self.io_loop.tsFromDelay(self.options.recv_idle_timeout);
                 },
                 else => {},
             }
@@ -615,7 +625,7 @@ pub fn Conn2(comptime Handler: type) type {
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
             if (self.state == .closing) return self.closeOrReconnect();
             assert(self.state == .connecting);
-            self.reconnects.count = 0;
+            self.reconnect_count = 0;
             self.accept(socket);
         }
 
@@ -725,7 +735,7 @@ pub fn Conn2(comptime Handler: type) type {
                 return;
 
             // Reconnect
-            if (self.state == .connecting and self.reconnects.enabled and self.address != null)
+            if (self.state == .connecting and self.options.reconnect.enabled and self.address != null)
                 return self.scheduleReconnect();
 
             // Close
@@ -736,13 +746,13 @@ pub fn Conn2(comptime Handler: type) type {
         fn disconnected(self: *Self, err: anyerror) void {
             if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
             if (self.state == .open)
-                self.state = if (self.address != null and self.reconnects.enabled) .connecting else .closing;
+                self.state = if (self.address != null and self.options.reconnect.enabled) .connecting else .closing;
             self.closeOrReconnect();
         }
     };
 }
 
-fn FixedSendVec(comptime size: usize) type {
+pub fn FixedSendVec(comptime size: usize) type {
     return struct {
         const Self = @This();
 
@@ -777,7 +787,7 @@ test "Conn2" {
     try loop.init(allocator, .{ .entries = 4, .recv_buffers = 2, .recv_buffer_len = 4096 });
     defer loop.deinit();
 
-    var handler: struct {
+    const Handler = struct {
         const Self = @This();
         tcp: Conn2(Self),
         send_vec: FixedSendVec(4) = .{},
@@ -797,8 +807,8 @@ test "Conn2" {
         }
 
         pub fn onDisconnect(self: *Self, err: anyerror) void {
-            std.debug.print("onDisconnect {} {}\n", .{ err, self.tcp.reconnects.count });
-            if (self.tcp.reconnects.count == 10) self.tcp.close();
+            std.debug.print("onDisconnect {} {}\n", .{ err, self.tcp.reconnect_count });
+            if (self.tcp.reconnect_count == 10) self.tcp.close();
         }
 
         pub fn onRecv(_: *Self, bytes: []const u8) void {
@@ -819,9 +829,13 @@ test "Conn2" {
         pub fn onRecvTimeout(_: *Self) void {
             std.debug.print("onRecvTimeout\n", .{});
         }
-    } = .{ .tcp = undefined };
+    };
 
-    handler.tcp = Conn2(@TypeOf(handler)).init(&loop, &handler);
+    var handler: Handler = .{ .tcp = undefined };
+    handler.tcp = Conn2(Handler).init(&loop, &handler, .{
+        .reconnect = .{ .enabled = true },
+        .recv_idle_timeout = 10_000,
+    });
     const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9999);
     handler.tcp.connect(addr);
 
