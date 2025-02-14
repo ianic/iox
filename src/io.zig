@@ -788,8 +788,7 @@ test "loop timer" {
 }
 
 fn timestamp() u64 {
-    var ts: posix.timespec = undefined;
-    posix.clock_gettime(.REALTIME, &ts) catch |err| switch (err) {
+    const ts: posix.timespec = posix.clock_gettime(.REALTIME) catch |err| switch (err) {
         error.UnsupportedClock, error.Unexpected => return 0, // "Precision of timing depends on hardware and OS".
     };
     return @as(u64, @intCast(ts.sec)) * ns_per_s + @as(u64, @intCast(ts.nsec));
@@ -840,27 +839,6 @@ test "size" {
     try testing.expectEqual(112, @sizeOf(net.Address));
     try testing.expectEqual(16, @sizeOf(linux.kernel_timespec));
     try testing.expectEqual(8, @sizeOf(?*Op));
-}
-
-test "pointer" {
-    const O = struct {
-        const Self = @This();
-
-        ptr: *?*Self,
-    };
-    const Ctx = struct {
-        op: ?*O = null,
-    };
-
-    var ctx = Ctx{};
-    var o = O{
-        .ptr = &ctx.op,
-    };
-    try testing.expect(ctx.op == null);
-    ctx.op = &o;
-    try testing.expect(ctx.op != null);
-    o.ptr.* = null;
-    try testing.expect(ctx.op == null);
 }
 
 const Metric = struct {
