@@ -549,6 +549,10 @@ pub fn Conn2(comptime Handler: type) type {
             };
         }
 
+        pub fn deinit(self: *Self) void {
+            if (self.timer_op) |*op| op.deinit();
+        }
+
         pub fn accept(self: *Self, socket: posix.socket_t) void {
             assert(self.socket == 0);
             self.socket = socket;
@@ -773,6 +777,63 @@ pub fn FixedSendVec(comptime size: usize) type {
         pub fn get(self: *Self) []posix.iovec_const {
             defer self.pos = 0;
             return self.iov[0..self.pos];
+        }
+    };
+}
+
+pub fn Listener2(comptime Factory: type) type {
+    return struct {
+        const Self = @This();
+
+        socket: posix.socket_t = 0,
+        io_loop: *io.Loop,
+        accept_op: io.Op = .{},
+        close_op: io.Op = .{},
+        factory: *Factory,
+
+        pub fn init(
+            io_loop: *io.Loop,
+            factory: *Factory,
+        ) Self {
+            return .{
+                .io_loop = io_loop,
+                .factory = factory,
+            };
+        }
+
+        /// Start multishot accept
+        pub fn bind(self: *Self, addr: net.Address) !void {
+            self.socket = try listenSocket(addr);
+            self.accept_op = io.Op.accept(self.socket, self, onAccept, onAcceptFail);
+            self.io_loop.submit(&self.accept_op);
+        }
+
+        fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
+            try self.factory.onAccept(self.io_loop, socket, addr);
+        }
+
+        fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
+            if (@hasDecl(Factory, "onError")) self.factory.onError(err);
+            self.io_loop.submit(&self.accept_op); // restart operation
+        }
+
+        fn onCancel(self: *Self, _: ?anyerror) void {
+            self.close();
+        }
+
+        /// Stop listening
+        pub fn close(self: *Self) void {
+            if (self.close_op.active()) return;
+            if (self.accept_op.active()) {
+                self.close_op = io.Op.cancel(&self.accept_op, self, onCancel);
+                return self.io_loop.submit(&self.close_op);
+            }
+            if (self.socket != 0) {
+                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
+                self.socket = 0;
+                return self.io_loop.submit(&self.close_op);
+            }
+            if (@hasDecl(Factory, "onError")) self.factory.onClose();
         }
     };
 }
