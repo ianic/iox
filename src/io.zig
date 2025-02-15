@@ -641,7 +641,7 @@ pub const Op = struct {
         args: SocketArgs,
         context: anytype,
         comptime success: fn (@TypeOf(context), socket_t) Error!void,
-        comptime fail: fn (@TypeOf(context), ?anyerror) void,
+        comptime fail: fn (@TypeOf(context), anyerror) void,
     ) Op {
         const Context = @TypeOf(context);
         const wrapper = struct {
@@ -672,7 +672,7 @@ pub const Op = struct {
         args: SocketArgs,
         context: anytype,
         comptime success: fn (@TypeOf(context), socket_t) Error!void,
-        comptime fail: fn (@TypeOf(context), ?anyerror) void,
+        comptime fail: fn (@TypeOf(context), anyerror) void,
     ) Op {
         const Context = @TypeOf(context);
         const wrapper = struct {
@@ -682,7 +682,7 @@ pub const Op = struct {
                     .SUCCESS => return try success(ctx, op.args.connect.socket),
                     else => |errno| {
                         const err = errFromErrno(errno);
-                        op.* = Op.close(op.args.connect.socket, err, ctx, fail);
+                        op.* = Op.closeErr(op.args.connect.socket, err, ctx, fail);
                         loop.submit(op);
                     },
                 }
@@ -717,6 +717,28 @@ pub const Op = struct {
             .context = @intFromPtr(context),
             .callback = wrapper.complete,
             .args = .{ .shutdown = socket },
+        };
+    }
+
+    // Close on socket connect error, return error from socket connect.
+    fn closeErr(
+        socket: socket_t,
+        err: anyerror,
+        context: anytype,
+        comptime done: fn (@TypeOf(context), anyerror) void,
+    ) Op {
+        const Context = @TypeOf(context);
+        const wrapper = struct {
+            fn complete(op: *Op, _: *Loop, cqe: linux.io_uring_cqe) Error!void {
+                _ = cqe;
+                const ctx: Context = @ptrFromInt(op.context);
+                done(ctx, op.args.close.err.?);
+            }
+        };
+        return .{
+            .context = @intFromPtr(context),
+            .callback = wrapper.complete,
+            .args = .{ .close = .{ .socket = socket, .err = err } },
         };
     }
 

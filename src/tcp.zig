@@ -342,7 +342,7 @@ pub fn GenericListener(
         }
 
         fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
-            self.factory.onError(err);
+            if (@hasDecl(Factory, "onError")) self.factory.onError(err);
             self.io_loop.submit(&self.accept_op); // restart operation
         }
 
@@ -419,8 +419,8 @@ pub fn GenericConnector(
             try upgradeFn(self.allocator, self.io_loop, self.factory, socket);
         }
 
-        fn onConnectFail(self: *Self, err: ?anyerror) void {
-            if (err) |e| self.factory.onError(e);
+        fn onConnectFail(self: *Self, err: anyerror) void {
+            self.factory.onError(err);
             self.close();
         }
 
@@ -629,21 +629,24 @@ pub fn Conn2(comptime Handler: type) type {
             self.accept(socket);
         }
 
-        fn onConnectFail(self: *Self, err_: ?anyerror) void {
+        fn onConnectFail(self: *Self, err: anyerror) void {
             if (self.state == .closing) return self.closeOrReconnect();
             assert(self.state == .connecting);
-            const err = err_ orelse error.ConnectionFailed;
             if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
             switch (err) {
-                // retriable errors: https://man7.org/linux/man-pages/man2/connect.2.html
-                error.ConnectionRefused,
-                error.OperationNowInProgress,
-                error.InterruptedSystemCall,
-                error.NetworkIsUnreachable,
-                error.ConnectionTimedOut,
-                error.ConnectionFailed,
+                // Retriable errors: https://man7.org/linux/man-pages/man2/connect.2.html
+                error.ConnectionRefused, // ECONNREFUSED
+                error.OperationNowInProgress, // EINPROGRESS
+                error.InterruptedSystemCall, // EINTR
+                error.TransportEndpointIsAlreadyConnected, // EISCONN
+                error.NetworkIsUnreachable, // ENETUNREACH
+                error.NoRouteToHost, // EHOSTUNREACH
+                error.ConnectionTimedOut, // ETIMEDOUT
+                error.OperationCanceled, // ECANCELED
+                error.OperationAlreadyInProgress, // EALREADY
+                error.TryAgain, // EAGAIN
                 => self.scheduleReconnect(),
-                // not retriable error
+                // Not retriable error
                 else => return self.close(),
             }
         }
@@ -784,7 +787,12 @@ test "Conn2" {
 
     const allocator = testing.allocator;
     var loop: io.Loop = undefined;
-    try loop.init(allocator, .{ .entries = 4, .recv_buffers = 2, .recv_buffer_len = 4096 });
+    try loop.init(allocator, .{
+        .entries = 4,
+        .recv_buffers = 2,
+        .recv_buffer_len = 4096,
+        .connect_timeout = .{ .sec = 1, .nsec = 0 },
+    });
     defer loop.deinit();
 
     const Handler = struct {
@@ -837,6 +845,7 @@ test "Conn2" {
         .recv_idle_timeout = 10_000,
     });
     const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9999);
+    // const addr = net.Address.initIp4([4]u8{ 10, 0, 0, 1 }, 9999);
     handler.tcp.connect(addr);
 
     while (handler.tcp.state != .closed) {
