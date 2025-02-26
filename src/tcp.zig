@@ -516,7 +516,8 @@ pub fn Conn2(comptime Handler: type) type {
         options: Options = .{},
         reconnect_count: usize = 0,
         reconnect_delay: u32 = 0,
-        recv_count: usize = 0,
+        recv_count: usize = 0, // number of recv since last timeout
+        recv_timeout_count: usize = 0, // number of consecutive timeouts
 
         pub const Options = struct {
             reconnect: struct {
@@ -557,6 +558,7 @@ pub fn Conn2(comptime Handler: type) type {
             assert(self.socket == 0);
             self.socket = socket;
             self.state = .open;
+            self.recv_timeout_count = 0;
             // Start multishot receive
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
             self.io_loop.submit(&self.recv_op);
@@ -569,10 +571,10 @@ pub fn Conn2(comptime Handler: type) type {
             assert(self.state == .closed);
             self.address = address;
             self.state = .connecting;
-            self.reconnect();
+            self.connectSubmit();
         }
 
-        fn reconnect(self: *Self) void {
+        fn connectSubmit(self: *Self) void {
             assert(self.state == .connecting);
             assert(self.address != null);
             self.connect_op = io.Op.connect(
@@ -584,7 +586,7 @@ pub fn Conn2(comptime Handler: type) type {
             self.io_loop.submit(&self.connect_op);
         }
 
-        fn scheduleReconnect(self: *Self) void {
+        fn connectSchedule(self: *Self) void {
             if (self.reconnect_count > 0) {
                 self.reconnect_delay = @min(
                     @max(
@@ -597,9 +599,9 @@ pub fn Conn2(comptime Handler: type) type {
             }
             self.reconnect_count += 1;
             if (self.reconnect_delay == 0)
-                return self.reconnect();
+                return self.connectSubmit();
             self.setTimer(self.reconnect_delay) catch {
-                self.reconnect();
+                self.connectSubmit();
             };
         }
 
@@ -613,10 +615,12 @@ pub fn Conn2(comptime Handler: type) type {
 
         fn onTimer(self: *Self, _: u64) !u64 {
             switch (self.state) {
-                .connecting => self.reconnect(),
+                .connecting => self.connectSubmit(),
                 .open => {
-                    if (self.recv_count == 0 and @hasDecl(Handler, "onRecvTimeout"))
+                    if (self.recv_count == 0 and @hasDecl(Handler, "onRecvTimeout")) {
+                        self.recv_timeout_count += 1;
                         self.handler.onRecvTimeout();
+                    }
                     self.recv_count = 0;
                     if (self.options.recv_idle_timeout > 0)
                         return self.io_loop.tsFromDelay(self.options.recv_idle_timeout);
@@ -649,7 +653,7 @@ pub fn Conn2(comptime Handler: type) type {
                 error.OperationCanceled, // ECANCELED
                 error.OperationAlreadyInProgress, // EALREADY
                 error.TryAgain, // EAGAIN
-                => self.scheduleReconnect(),
+                => self.connectSchedule(),
                 // Not retriable error
                 else => return self.close(),
             }
@@ -657,6 +661,10 @@ pub fn Conn2(comptime Handler: type) type {
 
         pub fn sendReady(self: *Self) bool {
             return self.state == .open and !self.send_op.active();
+        }
+
+        pub fn sendActive(self: *Self) bool {
+            return self.send_op.active();
         }
 
         pub fn send(self: *Self, iov: []posix.iovec_const) void {
@@ -694,6 +702,7 @@ pub fn Conn2(comptime Handler: type) type {
 
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
             self.recv_count += 1;
+            self.recv_timeout_count = 0;
             if (self.state == .closing) return;
             self.handler.onRecv(bytes);
             if (!self.recv_op.hasMore() and self.state == .open)
@@ -711,6 +720,13 @@ pub fn Conn2(comptime Handler: type) type {
         pub fn close(self: *Self) void {
             if (self.state == .closed) return;
             self.state = .closing;
+            self.closeOrReconnect();
+        }
+
+        pub fn reconnect(self: *Self) void {
+            if (self.state == .closed) return;
+            if (self.state == .open)
+                self.state = if (self.address != null and self.options.reconnect.enabled) .connecting else .closing;
             self.closeOrReconnect();
         }
 
@@ -743,7 +759,7 @@ pub fn Conn2(comptime Handler: type) type {
 
             // Reconnect
             if (self.state == .connecting and self.options.reconnect.enabled and self.address != null)
-                return self.scheduleReconnect();
+                return self.connectSchedule();
 
             // Close
             self.state = .closed;
@@ -752,9 +768,7 @@ pub fn Conn2(comptime Handler: type) type {
 
         fn disconnected(self: *Self, err: anyerror) void {
             if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
-            if (self.state == .open)
-                self.state = if (self.address != null and self.options.reconnect.enabled) .connecting else .closing;
-            self.closeOrReconnect();
+            self.reconnect();
         }
     };
 }
@@ -839,7 +853,7 @@ pub fn Listener2(comptime Factory: type) type {
 }
 
 test "Conn2" {
-    //if (true) return error.SkipZigTest;
+    if (true) return error.SkipZigTest;
     //
     // Run this test, in terminal start tcp listener on port 9999:
     // $ nc -l - p 9999
@@ -870,7 +884,7 @@ test "Conn2" {
             assert(self.send_vec.prep("pero "));
             assert(self.send_vec.prep("zdero "));
             assert(self.send_vec.prep("jozo "));
-            assert(self.send_vec.prep("bozo "));
+            assert(self.send_vec.prep("bozo\n"));
             assert(!self.send_vec.prep("nemere "));
             self.tcp.send(self.send_vec.get());
         }
@@ -895,15 +909,17 @@ test "Conn2" {
             std.debug.print("onClose\n", .{});
         }
 
-        pub fn onRecvTimeout(_: *Self) void {
-            std.debug.print("onRecvTimeout\n", .{});
+        pub fn onRecvTimeout(self: *Self) void {
+            std.debug.print("onRecvTimeout {}\n", .{self.tcp.recv_timeout_count});
+            if (self.tcp.recv_timeout_count > 3)
+                self.tcp.reconnect();
         }
     };
 
     var handler: Handler = .{ .tcp = undefined };
     handler.tcp = Conn2(Handler).init(&loop, &handler, .{
         .reconnect = .{ .enabled = true },
-        .recv_idle_timeout = 10_000,
+        .recv_idle_timeout = 1_000,
     });
     const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9999);
     // const addr = net.Address.initIp4([4]u8{ 10, 0, 0, 1 }, 9999);
