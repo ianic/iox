@@ -705,7 +705,7 @@ pub fn Conn2(comptime Handler: type) type {
             self.recv_timeout_count = 0;
             if (self.state == .closing) return;
             self.handler.onRecv(bytes);
-            if (!self.recv_op.hasMore() and self.state == .open)
+            if (!self.recv_op.hasMore() and !self.recv_op.canceled() and self.state == .open)
                 self.io_loop.submit(&self.recv_op);
         }
 
@@ -719,6 +719,7 @@ pub fn Conn2(comptime Handler: type) type {
 
         pub fn close(self: *Self) void {
             if (self.state == .closed) return;
+            if (self.state == .closing) return;
             self.state = .closing;
             self.closeOrReconnect();
         }
@@ -735,19 +736,23 @@ pub fn Conn2(comptime Handler: type) type {
         }
 
         fn closeOrReconnect(self: *Self) void {
-            if (self.connect_op.active() and !self.close_op.active()) {
+            std.debug.print(
+                "closeOrReconnect {} {} {} {}\n",
+                .{ self.connect_op.active(), self.recv_op.active(), self.close_op.active(), self.socket },
+            );
+            if (self.connect_op.active() and !self.connect_op.canceled() and !self.close_op.active()) {
                 self.close_op = io.Op.cancel(&self.connect_op, self, onCancel);
                 return self.io_loop.submit(&self.close_op);
             }
 
-            if (self.recv_op.active() and !self.close_op.active()) {
-                self.close_op = io.Op.cancel(&self.recv_op, self, onCancel);
+            if (self.socket != 0 and !self.close_op.active()) {
+                self.close_op = io.Op.closeSocket(self.socket, self, onCancel);
+                self.socket = 0;
                 return self.io_loop.submit(&self.close_op);
             }
 
-            if (self.socket != 0 and !self.close_op.active()) {
-                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
-                self.socket = 0;
+            if (self.recv_op.active() and !self.recv_op.canceled() and !self.close_op.active()) {
+                self.close_op = io.Op.cancel(&self.recv_op, self, onCancel);
                 return self.io_loop.submit(&self.close_op);
             }
 
@@ -767,7 +772,9 @@ pub fn Conn2(comptime Handler: type) type {
         }
 
         fn disconnected(self: *Self, err: anyerror) void {
-            if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
+            // state == closing is callers initiated close no need to notify about that
+            if (self.state != .closing and @hasDecl(Handler, "onDisconnect"))
+                self.handler.onDisconnect(err);
             self.reconnect();
         }
     };
@@ -853,10 +860,12 @@ pub fn Listener2(comptime Factory: type) type {
 }
 
 test "Conn2" {
-    if (true) return error.SkipZigTest;
+    //if (true) return error.SkipZigTest;
     //
     // Run this test, in terminal start tcp listener on port 9999:
-    // $ nc -l - p 9999
+    // $ nc -l -p 9999
+    // or in one liner
+    // $ nc -l -p 9999 &;  zig test src/tcp.zig --test-filter Conn2
     // Stop listener, start again, stop...
     // Connection should reconnect and finish test when 10 attempts reached.
 

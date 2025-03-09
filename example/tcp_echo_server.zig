@@ -8,7 +8,7 @@ const posix = std.posix;
 const log = std.log.scoped(.server);
 
 // Start server:
-//   $ zig build && zig-out/bin/tcp_echo
+//   $ zig build && zig-out/bin/tcp_echo_server
 // Send file and receive echo output:
 //   $ nc -w 1 localhost 9000 < some-file-name
 // Send some text:

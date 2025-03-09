@@ -208,6 +208,7 @@ pub const Loop = struct {
     pub fn submit(self: *Loop, op: *Op) void {
         assert(op.flags & Op.flag_submitted == 0);
         op.flags |= Op.flag_submitted;
+        op.flags &= ~Op.flag_canceled;
         op.prep(self) catch |err| {
             log.debug("fail to submit operation {}", .{err});
             self.pending.push(op);
@@ -266,6 +267,7 @@ pub const Op = struct {
 
     const flag_submitted: u8 = 1 << 0;
     const flag_has_more: u8 = 1 << 1;
+    const flag_canceled: u8 = 1 << 2;
 
     const Args = union(Kind) {
         accept: struct {
@@ -357,6 +359,10 @@ pub const Op = struct {
 
     pub fn hasMore(op: Op) bool {
         return op.flags & flag_has_more > 0;
+    }
+
+    pub fn canceled(op: Op) bool {
+        return op.flags & flag_canceled > 0;
     }
 
     fn prep(op: *Op, loop: *Loop) !void {
@@ -763,6 +769,29 @@ pub const Op = struct {
         };
     }
 
+    pub fn closeSocket(
+        socket: socket_t,
+        context: anytype,
+        comptime done: fn (@TypeOf(context), ?anyerror) void,
+    ) Op {
+        const Context = @TypeOf(context);
+        const wrapper = struct {
+            fn complete(op: *Op, _: *Loop, cqe: linux.io_uring_cqe) Error!void {
+                const err: ?anyerror = switch (cqe.err()) {
+                    .SUCCESS => null,
+                    else => |errno| errFromErrno(errno),
+                };
+                const ctx: Context = @ptrFromInt(op.context);
+                done(ctx, err);
+            }
+        };
+        return .{
+            .context = @intFromPtr(context),
+            .callback = wrapper.complete,
+            .args = .{ .close = .{ .socket = socket, .err = null } },
+        };
+    }
+
     pub fn cancel(
         op_to_cancel: *Op,
         context: anytype,
@@ -772,7 +801,11 @@ pub const Op = struct {
         const wrapper = struct {
             fn complete(op: *Op, _: *Loop, cqe: linux.io_uring_cqe) Error!void {
                 const err: ?anyerror = switch (cqe.err()) {
-                    .SUCCESS => null,
+                    .SUCCESS => brk: {
+                        // flag op_to_cancel as canceled
+                        op.args.cancel.flags |= Op.flag_canceled;
+                        break :brk null;
+                    },
                     else => |errno| errFromErrno(errno),
                 };
                 const ctx: Context = @ptrFromInt(op.context);
