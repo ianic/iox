@@ -736,10 +736,10 @@ pub fn Conn2(comptime Handler: type) type {
         }
 
         fn closeOrReconnect(self: *Self) void {
-            std.debug.print(
-                "closeOrReconnect {} {} {} {}\n",
-                .{ self.connect_op.active(), self.recv_op.active(), self.close_op.active(), self.socket },
-            );
+            // std.debug.print(
+            //     "closeOrReconnect {} {} {} {}\n",
+            //     .{ self.connect_op.active(), self.recv_op.active(), self.close_op.active(), self.socket },
+            // );
             if (self.connect_op.active() and !self.connect_op.canceled() and !self.close_op.active()) {
                 self.close_op = io.Op.cancel(&self.connect_op, self, onCancel);
                 return self.io_loop.submit(&self.close_op);
@@ -802,7 +802,7 @@ pub fn FixedSendVec(comptime size: usize) type {
     };
 }
 
-pub fn Listener2(comptime Factory: type) type {
+pub fn Server(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
@@ -810,15 +810,15 @@ pub fn Listener2(comptime Factory: type) type {
         io_loop: *io.Loop,
         accept_op: io.Op = .{},
         close_op: io.Op = .{},
-        factory: *Factory,
+        handler: *Handler,
 
         pub fn init(
             io_loop: *io.Loop,
-            factory: *Factory,
+            handler: *Handler,
         ) Self {
             return .{
                 .io_loop = io_loop,
-                .factory = factory,
+                .handler = handler,
             };
         }
 
@@ -830,12 +830,17 @@ pub fn Listener2(comptime Factory: type) type {
         }
 
         fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
-            try self.factory.onAccept(self.io_loop, socket, addr);
+            try self.handler.onAccept(self.io_loop, socket, addr);
         }
 
         fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
-            if (@hasDecl(Factory, "onError")) self.factory.onError(err);
-            self.io_loop.submit(&self.accept_op); // restart operation
+            switch (err) {
+                error.OperationCanceled => {},
+                else => {
+                    if (@hasDecl(Handler, "onError")) self.handler.onError(err);
+                    self.io_loop.submit(&self.accept_op); // restart operation
+                },
+            }
         }
 
         fn onCancel(self: *Self, _: ?anyerror) void {
@@ -845,22 +850,22 @@ pub fn Listener2(comptime Factory: type) type {
         /// Stop listening
         pub fn close(self: *Self) void {
             if (self.close_op.active()) return;
-            if (self.accept_op.active()) {
+            if (self.accept_op.active() and !self.accept_op.canceled()) {
                 self.close_op = io.Op.cancel(&self.accept_op, self, onCancel);
                 return self.io_loop.submit(&self.close_op);
             }
             if (self.socket != 0) {
-                self.close_op = io.Op.shutdown(self.socket, self, onCancel);
+                self.close_op = io.Op.closeSocket(self.socket, self, onCancel);
                 self.socket = 0;
                 return self.io_loop.submit(&self.close_op);
             }
-            if (@hasDecl(Factory, "onError")) self.factory.onClose();
+            if (@hasDecl(Handler, "onClose")) self.handler.onClose();
         }
     };
 }
 
 test "Conn2" {
-    //if (true) return error.SkipZigTest;
+    if (true) return error.SkipZigTest;
     //
     // Run this test, in terminal start tcp listener on port 9999:
     // $ nc -l -p 9999
@@ -935,6 +940,264 @@ test "Conn2" {
     handler.tcp.connect(addr);
 
     while (handler.tcp.state != .closed) {
+        try loop.tick();
+    }
+
+    //_ = try loop.run();
+}
+
+pub fn BufferedConn(Handler: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: mem.Allocator,
+        conn: Conn2(Self),
+        handler: *Handler,
+        recv_buf: RecvBuf,
+        send_list: std.ArrayList(posix.iovec_const), // pending send buffers
+        send_iov: []posix.iovec_const = &.{},
+        iovlen: usize = 0,
+
+        pub fn init(
+            self: *Self,
+            allocator: mem.Allocator,
+            io_loop: *io.Loop,
+            handler: *Handler,
+            options: Conn2(Self).Options,
+        ) void {
+            self.* = .{
+                .allocator = allocator,
+                .conn = Conn2(Self).init(io_loop, self, options),
+                .send_list = std.ArrayList(posix.iovec_const).init(allocator),
+                .recv_buf = RecvBuf.init(allocator),
+                .handler = handler,
+                .send_iov = &.{},
+            };
+        }
+
+        pub fn accept(self: *Self, socket: posix.socket_t) void {
+            self.conn.accept(socket);
+        }
+
+        pub fn connect(self: *Self, address: net.Address) void {
+            self.conn.connect(address);
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.clearSendList();
+            self.send_list.deinit();
+            self.allocator.free(self.send_iov);
+            self.recv_buf.free();
+            self.conn.deinit();
+            self.* = undefined;
+        }
+
+        /// Zero copy send it is callers responsibility to ensure lifetime of
+        /// `buf` until `onSend(buf)` is called.
+        pub fn sendZc(self: *Self, buf: []const u8) io.Error!void {
+            if (self.conn.state == .closed)
+                return self.handler.onSend(buf);
+            if (buf.len == 0)
+                return try self.sendPending();
+            const vec = vecFromBuf(buf);
+
+            // optimization
+            if (self.conn.sendReady() and self.send_iov.len > 0 and self.send_list.items.len == 0) {
+                self.iovlen = 1;
+                self.send_iov[0] = vec;
+                self.conn.send(self.send_iov[0..self.iovlen]);
+                return;
+            }
+
+            try self.send_list.append(vec);
+            errdefer _ = self.send_list.pop(); // reset send_list on error
+            try self.sendPending();
+        }
+
+        /// Vectorized zero copy send.
+        /// Example:
+        ///   sendVZc(&[_][]const u8{buf1, buf2, buf3});
+        pub fn sendVZc(self: *Self, bufs: []const []const u8) io.Error!void {
+            if (self.conn.state == .closed) {
+                for (bufs) |buf| self.handler.onSend(buf);
+                return;
+            }
+            try self.send_list.ensureUnusedCapacity(bufs.len);
+
+            const send_list_len = self.send_list.items.len;
+            for (bufs) |buf| if (buf.len > 0)
+                self.send_list.appendAssumeCapacity(vecFromBuf(buf));
+
+            errdefer self.send_list.items.len = send_list_len; // reset send_list
+            try self.sendPending();
+        }
+
+        /// Start send operation for buffers accumulated in send_list.
+        fn sendPending(self: *Self) !void {
+            if (!self.conn.sendReady() or self.send_list.items.len == 0) return;
+            self.conn.send(try self.prepareIov());
+        }
+
+        // Move send_list buffers to send_iov. send_list can accumulate new
+        // buffers while send_iov is in the kernel.
+        fn prepareIov(self: *Self) ![]posix.iovec_const {
+            const iovlen: u32 = @min(max_iov, self.send_list.items.len);
+
+            if (self.send_iov.len < iovlen) {
+                // resize self.send_iov
+                const iov = try self.allocator.alloc(posix.iovec_const, iovlen);
+                errdefer self.allocator.free(iov);
+                self.allocator.free(self.send_iov);
+                self.send_iov = iov;
+            }
+            // copy from send_list to send_iov
+            @memcpy(self.send_iov[0..iovlen], self.send_list.items[0..iovlen]);
+            // shrink self.send_list
+            mem.copyForwards(posix.iovec_const, self.send_list.items[0..], self.send_list.items[iovlen..]);
+            self.send_list.items.len -= iovlen;
+            self.iovlen = iovlen;
+
+            return self.send_iov[0..self.iovlen];
+        }
+
+        fn onSend(self: *Self, iov: []posix.iovec_const, err: ?anyerror) void {
+            self.iovlen = 0;
+            for (iov) |vec|
+                self.handler.onSend(bufFromVec(vec));
+            if (err == null)
+                self.sendPending() catch {};
+        }
+
+        fn onRecv(self: *Self, bytes: []u8) void {
+            self.onRecv_(bytes) catch |err| {
+                self.onError(err);
+                self.close();
+            };
+        }
+
+        fn onRecv_(self: *Self, bytes: []u8) !void {
+            const buf = try self.recv_buf.append(bytes);
+            const n = self.handler.onRecv(buf);
+            try self.recv_buf.set(buf[n..]);
+        }
+
+        pub fn close(self: *Self) void {
+            self.conn.close();
+        }
+
+        fn onClose(self: *Self) void {
+            self.clearSendList();
+            if (@hasDecl(Handler, "onClose")) self.handler.onClose();
+        }
+
+        fn clearSendList(self: *Self) void {
+            // buffers in send_list
+            for (self.send_list.items) |vec|
+                self.handler.onSend(bufFromVec(vec));
+            self.send_list.clearAndFree();
+            // buffers in send_iov
+            for (self.send_iov[0..self.iovlen]) |vec|
+                self.handler.onSend(bufFromVec(vec));
+        }
+
+        fn onConnect(self: *Self) void {
+            self.sendPending() catch |err| {
+                self.onError(err);
+                self.close();
+            };
+            if (@hasDecl(Handler, "onConnect")) self.handler.onConnect();
+        }
+        fn onError(self: *Self, err: anyerror) void {
+            if (@hasDecl(Handler, "onError")) self.handler.onError(err);
+        }
+        fn onDisconnect(self: *Self, err: anyerror) void {
+            if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
+        }
+        fn onRecvTimeout(self: *Self) void {
+            if (@hasDecl(Handler, "onRecvTimeout")) self.handler.onRecvTimeout();
+        }
+    };
+}
+
+fn bufFromVec(vec: posix.iovec_const) []const u8 {
+    var buf: []const u8 = undefined;
+    buf.ptr = vec.base;
+    buf.len = vec.len;
+    return buf;
+}
+
+fn vecFromBuf(buf: []const u8) posix.iovec_const {
+    return .{ .base = buf.ptr, .len = buf.len };
+}
+
+test "BufferedConn" {
+    if (true) return error.SkipZigTest;
+    //
+    // $ nc -l -p 9999 &;  zig test src/tcp.zig --test-filter Buffered
+
+    const allocator = testing.allocator;
+    var loop: io.Loop = undefined;
+    try loop.init(allocator, .{
+        .entries = 4,
+        .recv_buffers = 2,
+        .recv_buffer_len = 4096,
+        .connect_timeout = .{ .sec = 1, .nsec = 0 },
+    });
+    defer loop.deinit();
+
+    const Handler = struct {
+        const Self = @This();
+        tcp: BufferedConn(Self),
+        send_vec: FixedSendVec(4) = .{},
+
+        pub fn onError(_: *Self, err: anyerror) void {
+            std.debug.print("onError {}\n", .{err});
+        }
+
+        pub fn onConnect(_: *Self) void {
+            std.debug.print("onConnect\n", .{});
+        }
+
+        pub fn onSend(_: *Self, buf: []const u8) void {
+            std.debug.print("onSend v: {*} {} '{s}'\n", .{ buf.ptr, buf.len, buf });
+        }
+
+        pub fn onDisconnect(self: *Self, err: anyerror) void {
+            std.debug.print("onDisconnect {} {}\n", .{ err, self.tcp.conn.reconnect_count });
+            if (self.tcp.conn.reconnect_count == 10) self.tcp.close();
+        }
+
+        pub fn onRecv(_: *Self, bytes: []const u8) usize {
+            std.debug.print("onRecv {s}\n", .{bytes});
+            return bytes.len;
+        }
+
+        pub fn onClose(_: *Self) void {
+            std.debug.print("onClose\n", .{});
+        }
+
+        pub fn onRecvTimeout(self: *Self) void {
+            std.debug.print("onRecvTimeout {}\n", .{self.tcp.conn.recv_timeout_count});
+            if (self.tcp.conn.recv_timeout_count > 3)
+                self.tcp.conn.reconnect();
+        }
+    };
+
+    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9999);
+
+    var handler: Handler = .{ .tcp = undefined };
+    handler.tcp.init(testing.allocator, &loop, &handler, .{
+        .reconnect = .{ .enabled = true },
+        .recv_idle_timeout = 1_000,
+    });
+    defer handler.tcp.deinit();
+    handler.tcp.connect(addr);
+
+    try handler.tcp.sendZc("pero ");
+    try handler.tcp.sendZc("zdero ");
+    try handler.tcp.sendVZc(&[_][]const u8{ "jozo ", "bozo", "\n" });
+
+    while (handler.tcp.conn.state != .closed) {
         try loop.tick();
     }
 

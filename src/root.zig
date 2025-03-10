@@ -1,3 +1,4 @@
+const std = @import("std");
 const io = @import("io.zig");
 
 pub const Loop = io.Loop;
@@ -19,7 +20,10 @@ pub const tcp = struct {
     pub const Client = _tcp.Client;
 
     pub const Conn2 = _tcp.Conn2;
-    pub const Listener2 = _tcp.Listener2;
+    pub const Listener2 = _tcp.Server;
+    pub const BufferedConn = _tcp.BufferedConn;
+
+    pub const Server = _tcp.Server;
 };
 
 pub const udp = struct {
@@ -72,3 +76,42 @@ test {
 //     std.debug.captureStackTrace(null, &stack_trace);
 //     std.debug.dumpStackTrace(stack_trace);
 // }
+
+pub fn ConnectionPool(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        pool: std.heap.MemoryPool(T),
+        conns: std.AutoHashMap(*T, void),
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .pool = std.heap.MemoryPool(T).init(allocator),
+                .conns = std.AutoHashMap(*T, void).init(allocator),
+            };
+        }
+
+        pub fn create(self: *Self) !*T {
+            try self.conns.ensureUnusedCapacity(1);
+            const conn = try self.pool.create();
+            self.conns.putAssumeCapacityNoClobber(conn, {});
+            return conn;
+        }
+
+        pub fn destroy(self: *Self, conn: *T) void {
+            assert(self.conns.remove(conn));
+            self.pool.destroy(conn);
+        }
+
+        pub fn deinit(self: *Self) void {
+            var iter = self.conns.keyIterator();
+            while (iter.next()) |k| {
+                const conn = k.*;
+                conn.deinit();
+            }
+
+            self.conns.deinit();
+            self.pool.deinit();
+        }
+    };
+}

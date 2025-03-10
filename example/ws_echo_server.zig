@@ -4,7 +4,45 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
-const InstanceMap = @import("tcp_echo_server.zig").InstanceMap;
+
+pub fn InstanceMap(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: mem.Allocator,
+        instances: std.AutoHashMap(*T, void),
+
+        pub fn init(allocator: mem.Allocator) Self {
+            return .{
+                .allocator = allocator,
+                .instances = std.AutoHashMap(*T, void).init(allocator),
+            };
+        }
+
+        pub fn create(self: *Self) !*T {
+            try self.instances.ensureUnusedCapacity(1);
+            const instance = try self.allocator.create(T);
+            errdefer self.allocator.destroy(instance);
+            self.instances.putAssumeCapacityNoClobber(instance, {});
+            return instance;
+        }
+
+        pub fn destroy(self: *Self, instance: *T) void {
+            assert(self.instances.remove(instance));
+            self.allocator.destroy(instance);
+        }
+
+        pub fn deinit(self: *Self) void {
+            var iter = self.instances.keyIterator();
+            while (iter.next()) |k| {
+                const instance = k.*;
+                instance.deinit();
+                self.allocator.destroy(instance);
+            }
+            self.instances.deinit();
+        }
+    };
+}
 
 const log = std.log.scoped(.server);
 

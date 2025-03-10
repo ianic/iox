@@ -4,7 +4,7 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
-const InstanceMap = @import("tcp_echo_server.zig").InstanceMap;
+const InstanceMap = @import("ws_echo_server.zig").InstanceMap;
 
 const log = std.log.scoped(.server);
 

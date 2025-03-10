@@ -17,60 +17,31 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var factory = Factory.init(allocator);
-    defer factory.deinit();
+    var handler: Handler = undefined;
+    handler.init(allocator, &io_loop);
+    defer handler.deinit();
 
     const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
-    var connector = io.tcp.Connector(Factory).init(allocator, &io_loop, &factory, addr);
-    connector.connect();
+    handler.tcp.connect(addr);
 
     _ = try io_loop.run();
 }
 
-const Factory = struct {
-    const Self = @This();
-
-    allocator: mem.Allocator,
-    handler: ?*Handler = null,
-
-    fn init(allocator: mem.Allocator) Self {
-        return .{ .allocator = allocator };
-    }
-
-    fn deinit(self: *Self) void {
-        if (self.handler) |handler| {
-            handler.deinit();
-            self.allocator.destroy(handler);
-        }
-    }
-
-    pub fn create(self: *Self) !struct { *Handler, *io.tcp.Conn(Handler) } {
-        const handler = try self.allocator.create(Handler);
-        handler.* = .{
-            .allocator = self.allocator,
-            .tcp = undefined,
-        };
-        self.handler = handler;
-        return .{ handler, &handler.tcp };
-    }
-
-    pub fn onError(_: *Self, err: anyerror) void {
-        log.err("connect error {}", .{err});
-    }
-
-    pub fn onClose(_: *Self) void {
-        log.debug("connector closed ", .{});
-        posix.raise(posix.SIG.USR1) catch {};
-    }
-};
-
 const Handler = struct {
     const Self = @This();
-    const Tcp = io.tcp.Conn(Self);
+    const Tcp = io.tcp.BufferedConn(Self);
 
     allocator: mem.Allocator,
     tcp: Tcp,
     send_len: usize = 1,
+
+    fn init(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop) void {
+        self.* = .{
+            .allocator = allocator,
+            .tcp = undefined,
+        };
+        self.tcp.init(allocator, io_loop, self, .{});
+    }
 
     fn deinit(self: *Self) void {
         self.tcp.deinit();

@@ -4,6 +4,7 @@ const assert = std.debug.assert;
 const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
+const ConnectionPool = io.ConnectionPool(Conn);
 
 const log = std.log.scoped(.server);
 
@@ -23,43 +24,44 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var factory = Factory.init(allocator);
-    defer factory.deinit();
-
-    var listener = Listener.init(allocator, &io_loop, &factory);
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
-    try listener.bind(addr);
+    var server: Server = undefined;
+    try server.bind(allocator, &io_loop, addr);
+    defer server.deinit();
 
     _ = try io_loop.run();
 }
 
-const Listener = io.tcp.Listener(Factory);
-
-const Factory = struct {
+const Server = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
-    handlers: InstanceMap(Handler),
+    pool: ConnectionPool,
+    tcp: io.tcp.Server(Server),
 
-    fn init(allocator: mem.Allocator) Self {
-        return .{
+    fn bind(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) !void {
+        self.* = .{
             .allocator = allocator,
-            .handlers = InstanceMap(Handler).init(allocator),
+            .pool = ConnectionPool(Conn).init(allocator),
+            .tcp = undefined,
         };
+        self.tcp = .init(io_loop, self);
+        try self.tcp.bind(addr);
     }
 
     fn deinit(self: *Self) void {
-        self.handlers.deinit();
+        self.pool.deinit();
     }
 
-    pub fn create(self: *Self) !struct { *Handler, *io.tcp.Conn(Handler) } {
-        const handler = try self.handlers.create();
-        handler.* = .{
+    pub fn onAccept(self: *Self, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
+        const conn = try self.pool.create();
+        conn.* = .{
             .allocator = self.allocator,
-            .parent = self,
+            .pool = &self.pool,
             .tcp = undefined,
         };
-        return .{ handler, &handler.tcp };
+        conn.tcp.init(self.allocator, io_loop, conn, .{});
+        conn.tcp.accept(socket);
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
@@ -71,24 +73,23 @@ const Factory = struct {
     }
 };
 
-const Handler = struct {
+const Conn = struct {
     const Self = @This();
-    const Tcp = io.tcp.Conn(Self);
 
     allocator: mem.Allocator,
-    parent: *Factory,
-    tcp: Tcp,
+    pool: *ConnectionPool,
+    tcp: io.tcp.BufferedConn(Self),
 
     pub fn deinit(self: *Self) void {
         self.tcp.deinit();
     }
 
     pub fn onConnect(self: *Self) void {
-        log.debug("{*} connected socket: {} ", .{ self, self.tcp.socket });
+        log.debug("{*} connected socket: {} ", .{ self, self.tcp.conn.socket });
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) usize {
-        // log.debug("{*} recv {} bytes", .{ self, bytes.len });
+        //log.debug("{*} recv {} bytes", .{ self, bytes.len });
         self.send(bytes) catch |err| {
             log.err("send {}", .{err});
             self.tcp.close();
@@ -108,49 +109,10 @@ const Handler = struct {
     pub fn onClose(self: *Self) void {
         log.debug("{*} closed", .{self});
         self.deinit();
-        self.parent.handlers.destroy(self);
+        self.pool.destroy(self);
     }
 
     pub fn onError(self: *Self, err: anyerror) void {
         log.err("{*} on error {}", .{ self, err });
     }
 };
-
-pub fn InstanceMap(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        allocator: mem.Allocator,
-        instances: std.AutoHashMap(*T, void),
-
-        pub fn init(allocator: mem.Allocator) Self {
-            return .{
-                .allocator = allocator,
-                .instances = std.AutoHashMap(*T, void).init(allocator),
-            };
-        }
-
-        pub fn create(self: *Self) !*T {
-            try self.instances.ensureUnusedCapacity(1);
-            const instance = try self.allocator.create(T);
-            errdefer self.allocator.destroy(instance);
-            self.instances.putAssumeCapacityNoClobber(instance, {});
-            return instance;
-        }
-
-        pub fn destroy(self: *Self, instance: *T) void {
-            assert(self.instances.remove(instance));
-            self.allocator.destroy(instance);
-        }
-
-        pub fn deinit(self: *Self) void {
-            var iter = self.instances.keyIterator();
-            while (iter.next()) |k| {
-                const instance = k.*;
-                instance.deinit();
-                self.allocator.destroy(instance);
-            }
-            self.instances.deinit();
-        }
-    };
-}
