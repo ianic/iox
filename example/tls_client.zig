@@ -40,66 +40,23 @@ pub fn main() !void {
     });
     defer io_loop.deinit();
 
-    var factory = Factory.init(allocator, config);
-    defer factory.deinit();
-
-    var connector = io.tls.Connector(Factory).init(allocator, &io_loop, &factory, addr);
-    connector.connect();
+    var https: Https = .{
+        .allocator = allocator,
+        .host = host,
+        .tls = undefined,
+    };
+    try https.tls.init(allocator, &io_loop, &https, config);
+    defer https.deinit();
+    https.tls.connect(addr);
 
     _ = try io_loop.run();
 
     showDiagnostic(&diagnostic, host_arg);
 }
 
-const Factory = struct {
-    const Self = @This();
-
-    allocator: mem.Allocator,
-    config: io.tls.config.Client,
-    handler: ?*Https = null,
-
-    fn init(
-        allocator: mem.Allocator,
-        config: io.tls.config.Client,
-    ) Self {
-        return .{
-            .allocator = allocator,
-            .config = config,
-        };
-    }
-
-    fn deinit(self: *Self) void {
-        if (self.handler) |handler| {
-            handler.deinit();
-            self.allocator.destroy(handler);
-        }
-    }
-
-    pub fn create(self: *Self) !struct { *Https, *Https.Tls } {
-        const handler = try self.allocator.create(Https);
-        errdefer self.allocator.destroy(handler);
-        handler.* = .{
-            .allocator = self.allocator,
-            .host = self.config.host,
-            .tls = undefined,
-        };
-        self.handler = handler;
-        return .{ handler, &handler.tls };
-    }
-
-    pub fn onError(_: *Self, err: anyerror) void {
-        log.err("connect error {}", .{err});
-    }
-
-    pub fn onClose(_: *Self) void {
-        log.debug("connector closed ", .{});
-        posix.raise(posix.SIG.USR1) catch {};
-    }
-};
-
 const Https = struct {
     const Self = @This();
-    const Tls = io.tls.Conn(Self, .client);
+    const Tls = io.tls.Client(Self);
 
     allocator: mem.Allocator,
     host: []const u8,

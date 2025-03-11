@@ -24,72 +24,28 @@ pub fn main() !void {
         // example of how to get handshake failure, use some really old cipher
         // .cipher_suites = &[_]io.tls.options.CipherSuite{.RSA_WITH_AES_128_CBC_SHA},
     };
+    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
 
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var factory = Factory.init(allocator, config);
-    defer factory.deinit();
-
-    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
-    var connector = io.tls.Connector(Factory).init(allocator, &io_loop, &factory, addr);
-    connector.connect();
+    var handler: Handler = .{
+        .allocator = allocator,
+        .tls = undefined,
+    };
+    try handler.tls.init(allocator, &io_loop, &handler, config);
+    defer handler.deinit();
+    handler.tls.connect(addr);
 
     _ = try io_loop.run();
 }
 
-const Factory = struct {
-    const Self = @This();
-
-    allocator: mem.Allocator,
-    config: io.tls.config.Client,
-    handler: ?*Handler = null,
-
-    fn init(
-        allocator: mem.Allocator,
-        config: io.tls.config.Client,
-    ) Self {
-        return .{
-            .allocator = allocator,
-            .config = config,
-        };
-    }
-
-    fn deinit(self: *Self) void {
-        if (self.handler) |handler| {
-            handler.deinit();
-            self.allocator.destroy(handler);
-        }
-    }
-
-    pub fn create(self: *Self) !struct { *Handler, *Handler.Tls } {
-        const handler = try self.allocator.create(Handler);
-        errdefer self.allocator.destroy(handler);
-        handler.* = .{
-            .allocator = self.allocator,
-            .tls = undefined,
-        };
-        self.handler = handler;
-        return .{ handler, &handler.tls };
-    }
-
-    pub fn onError(_: *Self, err: anyerror) void {
-        log.err("connect error {}", .{err});
-    }
-
-    pub fn onClose(_: *Self) void {
-        log.debug("connector closed ", .{});
-        posix.raise(posix.SIG.USR1) catch {};
-    }
-};
-
 const Handler = struct {
     const Self = @This();
-    const Tls = io.tls.Conn(Self, .client);
 
     allocator: mem.Allocator,
-    tls: Tls,
+    tls: io.tls.Client(Self),
     send_len: usize = 1,
 
     pub fn deinit(self: *Self) void {

@@ -15,14 +15,7 @@ pub const tcp = struct {
     const _tcp = @import("tcp.zig");
 
     pub const Conn = _tcp.Conn;
-    pub const Listener = _tcp.Listener;
-    pub const Connector = _tcp.Connector;
-    pub const Client = _tcp.Client;
-
-    pub const Conn2 = _tcp.Conn2;
-    pub const Listener2 = _tcp.Server;
     pub const BufferedConn = _tcp.BufferedConn;
-
     pub const Server = _tcp.Server;
 };
 
@@ -35,11 +28,8 @@ pub const tls = struct {
     const _tls = @import("tls.zig");
 
     pub const config = _lib.config;
-    pub const HandshakeKind = _tls.HandshakeKind;
-
+    pub const Client = _tls.Client;
     pub const Conn = _tls.Conn;
-    pub const Connector = _tls.Connector;
-    pub const Listener = _tls.Listener;
 };
 
 pub const ws = struct {
@@ -99,7 +89,7 @@ pub fn ConnectionPool(comptime T: type) type {
         }
 
         pub fn destroy(self: *Self, conn: *T) void {
-            assert(self.conns.remove(conn));
+            std.debug.assert(self.conns.remove(conn));
             self.pool.destroy(conn);
         }
 

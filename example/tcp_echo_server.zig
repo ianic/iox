@@ -37,12 +37,12 @@ const Server = struct {
 
     allocator: mem.Allocator,
     pool: ConnectionPool,
-    tcp: io.tcp.Server(Server),
+    tcp: io.tcp.Server(Self),
 
     fn bind(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) !void {
         self.* = .{
             .allocator = allocator,
-            .pool = ConnectionPool(Conn).init(allocator),
+            .pool = ConnectionPool.init(allocator),
             .tcp = undefined,
         };
         self.tcp = .init(io_loop, self);
