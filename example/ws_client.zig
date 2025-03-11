@@ -33,63 +33,18 @@ pub fn main() !void {
     try io_loop.init(allocator, .{});
     defer io_loop.deinit();
 
-    var factory = Factory.init(allocator, config);
-    defer factory.deinit();
-
-    var connector = io.ws.Connector(Factory).init(allocator, &io_loop, &factory, config.addr);
-    connector.connect();
+    var handler: Handler = undefined;
+    try handler.ws.init(allocator, &io_loop, &handler, config);
+    defer handler.deinit();
+    handler.ws.connect(config.addr);
 
     _ = try io_loop.run();
 }
 
-const Factory = struct {
-    const Self = @This();
-
-    allocator: mem.Allocator,
-    config: io.ws.config.Client,
-    handler: ?*Handler = null,
-
-    fn init(
-        allocator: mem.Allocator,
-        config: io.ws.config.Client,
-    ) Self {
-        return .{
-            .allocator = allocator,
-            .config = config,
-        };
-    }
-
-    fn deinit(self: *Self) void {
-        if (self.handler) |handler| {
-            handler.deinit();
-            self.allocator.destroy(handler);
-        }
-    }
-
-    pub fn create(self: *Self) !struct { *Handler, *Handler.Ws } {
-        const handler = try self.allocator.create(Handler);
-        errdefer self.allocator.destroy(handler);
-        handler.* = .{ .ws = undefined };
-        self.handler = handler;
-        log.debug("connected to: {s}", .{self.config.uri});
-        return .{ handler, &handler.ws };
-    }
-
-    pub fn onError(_: *Self, err: anyerror) void {
-        log.err("connect error {}", .{err});
-    }
-
-    pub fn onClose(_: *Self) void {
-        log.debug("connector closed ", .{});
-        posix.raise(posix.SIG.USR1) catch {};
-    }
-};
-
 const Handler = struct {
     const Self = @This();
-    const Ws = io.ws.Conn(Self, .client);
 
-    ws: Ws,
+    ws: io.ws.Conn(Self, .client),
 
     fn deinit(self: *Self) void {
         self.ws.deinit();

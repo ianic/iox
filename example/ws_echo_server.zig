@@ -5,45 +5,6 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 
-pub fn InstanceMap(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        allocator: mem.Allocator,
-        instances: std.AutoHashMap(*T, void),
-
-        pub fn init(allocator: mem.Allocator) Self {
-            return .{
-                .allocator = allocator,
-                .instances = std.AutoHashMap(*T, void).init(allocator),
-            };
-        }
-
-        pub fn create(self: *Self) !*T {
-            try self.instances.ensureUnusedCapacity(1);
-            const instance = try self.allocator.create(T);
-            errdefer self.allocator.destroy(instance);
-            self.instances.putAssumeCapacityNoClobber(instance, {});
-            return instance;
-        }
-
-        pub fn destroy(self: *Self, instance: *T) void {
-            assert(self.instances.remove(instance));
-            self.allocator.destroy(instance);
-        }
-
-        pub fn deinit(self: *Self) void {
-            var iter = self.instances.keyIterator();
-            while (iter.next()) |k| {
-                const instance = k.*;
-                instance.deinit();
-                self.allocator.destroy(instance);
-            }
-            self.instances.deinit();
-        }
-    };
-}
-
 const log = std.log.scoped(.server);
 
 pub fn main() !void {
@@ -58,11 +19,9 @@ pub fn main() !void {
     const config = io.ws.config.Server{ .scheme = .ws, .uri = "ws://localhost:9002" };
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9002);
 
-    var factory = Factory.init(allocator, config);
-    defer factory.deinit();
-
-    var listener = io.ws.Listener(Factory).init(allocator, &io_loop, &factory);
-    try listener.bind(addr);
+    var server: Server = undefined;
+    try server.bind(allocator, &io_loop, addr, config);
+    defer server.deinit();
 
     // Use certs from tls.zig project
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
@@ -71,46 +30,55 @@ pub fn main() !void {
     defer auth.deinit(allocator);
     var wss_config = try io.ws.config.Server.fromUri("wss://localhost:9003");
     wss_config.tls = .{ .auth = &auth };
+    const wss_addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9003);
 
-    const wss_addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9003);
-
-    var wss_factory = Factory.init(allocator, wss_config);
-    defer wss_factory.deinit();
-
-    var wss_listener = io.ws.Listener(Factory).init(allocator, &io_loop, &wss_factory);
-    try wss_listener.bind(wss_addr);
+    var wss_server: Server = undefined;
+    try wss_server.bind(allocator, &io_loop, wss_addr, wss_config);
+    defer wss_server.deinit();
 
     _ = try io_loop.run();
 }
 
-const Factory = struct {
+const ConnectionPool = io.ConnectionPool(Handler);
+const TcpServer = io.tcp.Server(Server);
+
+const Server = struct {
     const Self = @This();
 
     allocator: mem.Allocator,
+    pool: ConnectionPool,
+    tcp: TcpServer,
     config: io.ws.config.Server,
-    handlers: InstanceMap(Handler),
 
-    fn init(allocator: mem.Allocator, config: io.ws.config.Server) Self {
-        return .{
+    fn bind(
+        self: *Self,
+        allocator: mem.Allocator,
+        io_loop: *io.Loop,
+        addr: net.Address,
+        config: io.ws.config.Server,
+    ) !void {
+        self.* = .{
             .allocator = allocator,
+            .pool = ConnectionPool.init(allocator),
             .config = config,
-            .handlers = InstanceMap(Handler).init(allocator),
+            .tcp = undefined,
         };
+        self.tcp = .init(io_loop, self);
+        try self.tcp.bind(addr);
     }
 
     fn deinit(self: *Self) void {
-        self.handlers.deinit();
+        self.pool.deinit();
     }
 
-    pub fn create(self: *Self) !struct { *Handler, *Handler.Ws } {
-        const handler = try self.handlers.create();
-        errdefer self.handlers.destroy(handler);
+    pub fn onAccept(self: *Self, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
+        const handler = try self.pool.create();
         handler.* = .{
-            .parent = self,
+            .pool = &self.pool,
             .ws = undefined,
         };
-        log.debug("connected to {s}", .{self.config.uri});
-        return .{ handler, &handler.ws };
+        try handler.ws.init(self.allocator, io_loop, handler, self.config);
+        handler.ws.accept(socket);
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
@@ -118,16 +86,15 @@ const Factory = struct {
     }
 
     pub fn onClose(_: *Self) void {
-        // log.debug("listener closed ", .{});
+        log.debug("listener closed ", .{});
     }
 };
 
 const Handler = struct {
     const Self = @This();
-    const Ws = io.ws.Conn(Self, .server);
 
-    parent: *Factory,
-    ws: Ws,
+    pool: *ConnectionPool,
+    ws: io.ws.Conn(Self, .server),
 
     pub fn deinit(self: *Self) void {
         self.ws.deinit();
@@ -148,7 +115,7 @@ const Handler = struct {
     pub fn onClose(self: *Self) void {
         // log.debug("{*} closed", .{self});
         self.deinit();
-        self.parent.handlers.destroy(self);
+        self.pool.destroy(self);
     }
 
     pub fn onError(self: *Self, err: anyerror) void {
