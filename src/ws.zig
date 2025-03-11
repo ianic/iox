@@ -75,7 +75,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             pub fn onConnect(tf: *TransportFacade) void {
                 const conn = tf.parent();
                 conn.lib.connect() catch |err| {
-                    conn.handler.onError(err);
+                    if (@hasDecl(Handler, "onError")) conn.handler.onError(err);
                     conn.close();
                 };
             }
@@ -84,7 +84,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
                 const conn = tf.parent();
                 return conn.lib.recv(bytes) catch |err| {
                     if (err != error.EndOfStream)
-                        conn.handler.onError(err);
+                        if (@hasDecl(Handler, "onError")) conn.handler.onError(err);
                     conn.close();
                     return bytes.len;
                 };
@@ -95,7 +95,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             }
 
             pub fn onError(tf: *TransportFacade, err: anyerror) void {
-                tf.parent().handler.onError(err);
+                if (@hasDecl(Handler, "onError")) tf.parent().handler.onError(err);
             }
 
             pub fn onClose(tf: *TransportFacade) void {
@@ -111,7 +111,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
             // Event fired when websocket handshake is finished
             pub fn onConnect(lf: *LibFacade) void {
-                lf.parent().handler.onConnect();
+                if (@hasDecl(Handler, "onConnect")) lf.parent().handler.onConnect();
             }
 
             // Event fired when message is received
@@ -282,10 +282,12 @@ fn getAddress(allocator: mem.Allocator, host: []const u8, port: u16) !net.Addres
 test {
     const Handler = struct {
         const Self = @This();
-        pub fn onConnect(_: *Self) void {}
+        // required methods
         pub fn onRecv(_: *Self, _: io.ws.Msg) void {}
-        pub fn onError(_: *Self, _: anyerror) void {}
         pub fn onClose(_: *Self) void {}
+        // optional methods
+        pub fn onConnect(_: *Self) void {}
+        pub fn onError(_: *Self, _: anyerror) void {}
     };
     { // ensure it compiles
         var io_loop: io.Loop = undefined;

@@ -62,7 +62,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             }
 
             pub fn onError(tf: *TcpFacade, err: anyerror) void {
-                tf.parent().handler.onError(err);
+                if (@hasDecl(Handler, "onError")) tf.parent().handler.onError(err);
             }
         };
 
@@ -76,7 +76,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
             // tls handshake finished
             pub fn onConnect(lf: *LibFacade) void {
-                lf.parent().handler.onConnect();
+                if (@hasDecl(Handler, "onConnect")) lf.parent().handler.onConnect();
             }
 
             // decrypted cleartext from tls lib
@@ -128,7 +128,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
         }
 
         fn closeErr(self: *ConnT, err: anyerror) void {
-            self.handler.onError(err);
+            if (@hasDecl(Handler, "onError")) self.handler.onError(err);
             self.tcp.close();
         }
 
@@ -136,7 +136,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             try self.lib.send(cleartext);
         }
 
-        // TODO: rethink this
+        // TODO: rethink this, needed for the same interface across tls/tcp
         pub fn sendZc(self: *ConnT, cleartext: []const u8) !void {
             try self.send(cleartext);
             self.handler.onSend(cleartext);
