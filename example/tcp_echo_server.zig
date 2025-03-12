@@ -84,16 +84,13 @@ const Conn = struct {
         self.tcp.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
+    pub fn onConnect(self: *Self) !void {
         log.debug("{*} connected socket: {} ", .{ self, self.tcp.conn.socket });
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) usize {
+    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
         //log.debug("{*} recv {} bytes", .{ self, bytes.len });
-        self.send(bytes) catch |err| {
-            log.err("send {}", .{err});
-            self.tcp.close();
-        };
+        try self.send(bytes);
         return bytes.len;
     }
 

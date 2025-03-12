@@ -100,15 +100,12 @@ const Conn = struct {
         self.tls.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
+    pub fn onConnect(self: *Self) !void {
         log.debug("{*} connected", .{self});
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) usize {
-        self.tls.send(bytes) catch |err| {
-            log.err("{*} send {}", .{ self, err });
-            self.tls.close();
-        };
+    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+        try self.tls.send(bytes);
         return bytes.len;
     }
 

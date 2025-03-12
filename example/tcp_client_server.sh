@@ -12,5 +12,5 @@ do
   zig-out/bin/tcp_echo_client &
 done
 
-sleep 5
+sleep 20
 kill $server_pid

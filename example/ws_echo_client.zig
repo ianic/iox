@@ -50,27 +50,20 @@ const Handler = struct {
         self.ws.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
+    pub fn onConnect(self: *Self) !void {
         // log.debug("{*} onConnect", .{self});
-        self.send();
+        try self.send();
     }
 
-    pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
+    pub fn onRecv(self: *Self, msg: io.ws.Msg) !void {
         assert(msg.data.len == self.send_len);
         for (0..msg.data.len) |i| assert(msg.data[i] == @as(u8, @intCast(i % 256)));
         log.debug("recv {} bytes", .{msg.data.len});
 
-        self.send();
+        try self.send();
     }
 
-    fn send(self: *Self) void {
-        self.send_() catch |err| {
-            log.err("send failed {}", .{err});
-            self.ws.close();
-        };
-    }
-
-    fn send_(self: *Self) !void {
+    fn send(self: *Self) !void {
         if (self.send_len >= 1024)
             return self.ws.close();
 

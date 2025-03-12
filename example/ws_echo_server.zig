@@ -100,16 +100,13 @@ const Handler = struct {
         self.ws.deinit();
     }
 
-    pub fn onConnect(_: *Self) void {
+    pub fn onConnect(_: *Self) !void {
         // log.debug("{*} connected", .{self});
     }
 
-    pub fn onRecv(self: *Self, msg: io.ws.Msg) void {
+    pub fn onRecv(self: *Self, msg: io.ws.Msg) !void {
         // log.debug("{*} onRecv {} bytes", .{ self, msg.data.len });
-        self.ws.send(msg) catch |err| {
-            log.err("{*} send {}", .{ self, err });
-            self.ws.close();
-        };
+        try self.ws.send(msg);
     }
 
     pub fn onClose(self: *Self) void {

@@ -2,8 +2,10 @@ const std = @import("std");
 const net = std.net;
 const mem = std.mem;
 const posix = std.posix;
-const io = @import("root.zig");
+
 const tls = @import("tls");
+
+const io = @import("root.zig");
 const RecvBuf = @import("tcp.zig").RecvBuf;
 
 pub fn Client(comptime Handler: type) type {
@@ -23,6 +25,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             .server => tls.asyn.Server(LibFacade),
         };
 
+        allocator: mem.Allocator,
         handler: *Handler,
         tcp: Tcp,
         lib: Lib,
@@ -36,18 +39,13 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             }
 
             // tcp is connected start tls handshake
-            pub fn onConnect(tf: *TcpFacade) void {
-                const conn = tf.parent();
-                conn.lib.connect() catch |err| conn.closeErr(err);
+            pub fn onConnect(tf: *TcpFacade) !void {
+                try tf.parent().lib.connect();
             }
 
             // Ciphertext bytes received from tcp, pass it to tls lib
-            pub fn onRecv(tf: *TcpFacade, ciphertext: []u8) usize {
-                const conn = tf.parent();
-                return conn.lib.recv(ciphertext) catch |err| {
-                    conn.closeErr(err);
-                    return ciphertext.len;
-                };
+            pub fn onRecv(tf: *TcpFacade, ciphertext: []u8) !usize {
+                return try tf.parent().lib.recv(ciphertext);
             }
 
             // tcp connection is closed.
@@ -68,7 +66,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
         // Tls library callbacks hidden from ConnT public interface into
         const LibFacade = struct {
-            recv_buf: RecvBuf,
+            recv_buf: RecvBuf = .empty,
 
             inline fn parent(lf: *LibFacade) *ConnT {
                 return @alignCast(@fieldParentPtr("lib_facade", lf));
@@ -76,15 +74,18 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
             // tls handshake finished
             pub fn onConnect(lf: *LibFacade) void {
-                if (@hasDecl(Handler, "onConnect")) lf.parent().handler.onConnect();
+                if (@hasDecl(Handler, "onConnect")) {
+                    const conn = lf.parent();
+                    conn.handler.onConnect() catch |err| conn.closeErr(err);
+                }
             }
 
             // decrypted cleartext from tls lib
             pub fn onRecv(lf: *LibFacade, cleartext: []u8) void {
                 const conn = lf.parent();
-                const buf = lf.recv_buf.append(cleartext) catch |err| return conn.closeErr(err);
-                const n = conn.handler.onRecv(buf);
-                lf.recv_buf.set(buf[n..]) catch |err| conn.closeErr(err);
+                const buf = lf.recv_buf.append(conn.allocator, cleartext) catch |err| return conn.closeErr(err);
+                const n = conn.handler.onRecv(buf) catch |err| return conn.closeErr(err);
+                lf.recv_buf.set(conn.allocator, buf[n..]) catch |err| conn.closeErr(err);
             }
 
             // tls lib sends ciphertext
@@ -101,9 +102,10 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             config: Config,
         ) io.Error!void {
             self.* = .{
+                .allocator = allocator,
                 .handler = handler,
                 .tcp_facade = .{},
-                .lib_facade = .{ .recv_buf = RecvBuf.init(allocator) },
+                .lib_facade = .{},
                 .tcp = undefined,
                 .lib = Lib.init(allocator, &self.lib_facade, config) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -122,7 +124,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
         }
 
         pub fn deinit(self: *ConnT) void {
-            self.lib_facade.recv_buf.free();
+            self.lib_facade.recv_buf.free(self.allocator);
             self.tcp.deinit();
             self.lib.deinit();
         }

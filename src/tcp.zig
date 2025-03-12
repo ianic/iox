@@ -7,6 +7,57 @@ const io = @import("io.zig");
 const timer = @import("timer.zig");
 const testing = std.testing;
 
+test {
+    const Handler = struct {
+        const Self = @This();
+        conn: Conn(Self),
+
+        // required Handler methods
+
+        // on error closes connection
+        pub fn onRecv(_: *Self, bytes: []const u8) !void {
+            _ = bytes;
+        }
+
+        //
+        pub fn onSend(_: *Self, iov: []posix.iovec_const, err: ?anyerror) void {
+            _ = iov;
+            _ = err;
+        }
+
+        pub fn onClose(_: *Self) void {}
+
+        // optional methods
+
+        // on error closes connection
+        pub fn onConnect(_: *Self) !void {}
+
+        pub fn onDisconnect(_: *Self, err: anyerror) void {
+            _ = err;
+        }
+
+        // unexpected error
+        pub fn onError(_: *Self, err: anyerror) void {
+            _ = err;
+        }
+
+        pub fn onRecvTimeout(_: *Self) void {}
+
+        // conn interface
+        //
+        // conn.accept(socket posix.socket_t) void
+        // conn.connect(addr: net.Address) void
+
+        // conn.sendReady() bool
+        // conn.send(iov: []posix.iovec_const) void
+
+        // conn.close() void
+    };
+
+    var handler: Handler = undefined;
+    handler.conn = Conn(Handler).init(undefined, &handler, undefined);
+}
+
 pub fn Conn(comptime Handler: type) type {
     return struct {
         const Self = @This();
@@ -82,7 +133,12 @@ pub fn Conn(comptime Handler: type) type {
             // Start multishot receive
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
             self.io_loop.submit(&self.recv_op);
-            if (@hasDecl(Handler, "onConnect")) self.handler.onConnect();
+            if (@hasDecl(Handler, "onConnect")) {
+                self.handler.onConnect() catch |err| {
+                    if (@hasDecl(Handler, "onError")) self.handler.onError(err);
+                    return self.close();
+                };
+            }
             if (@hasDecl(Handler, "onRecvTimeout") and self.options.recv_idle_timeout > 0)
                 self.setTimer(self.options.recv_idle_timeout) catch {};
         }
@@ -224,7 +280,10 @@ pub fn Conn(comptime Handler: type) type {
             self.recv_count += 1;
             self.recv_timeout_count = 0;
             if (self.state == .closing) return;
-            self.handler.onRecv(bytes);
+            self.handler.onRecv(bytes) catch |err| {
+                if (@hasDecl(Handler, "onError")) self.handler.onError(err);
+                return self.close();
+            };
             if (!self.recv_op.hasMore() and !self.recv_op.canceled() and self.state == .open)
                 self.io_loop.submit(&self.recv_op);
         }
@@ -308,7 +367,7 @@ pub fn BufferedConn(Handler: type) type {
         conn: Conn(Self),
         handler: *Handler,
         recv_buf: RecvBuf,
-        send_list: std.ArrayList(posix.iovec_const), // pending send buffers
+        send_list: std.ArrayListUnmanaged(posix.iovec_const), // pending send buffers
         send_iov: []posix.iovec_const = &.{},
         iovlen: usize = 0,
 
@@ -322,8 +381,8 @@ pub fn BufferedConn(Handler: type) type {
             self.* = .{
                 .allocator = allocator,
                 .conn = Conn(Self).init(io_loop, self, options),
-                .send_list = std.ArrayList(posix.iovec_const).init(allocator),
-                .recv_buf = RecvBuf.init(allocator),
+                .send_list = .empty,
+                .recv_buf = .empty,
                 .handler = handler,
                 .send_iov = &.{},
             };
@@ -339,11 +398,21 @@ pub fn BufferedConn(Handler: type) type {
 
         pub fn deinit(self: *Self) void {
             self.clearSendList();
-            self.send_list.deinit();
+            self.send_list.deinit(self.allocator);
             self.allocator.free(self.send_iov);
-            self.recv_buf.free();
+            self.recv_buf.free(self.allocator);
             self.conn.deinit();
             self.* = undefined;
+        }
+
+        fn clearSendList(self: *Self) void {
+            // buffers in send_list
+            for (self.send_list.items) |vec|
+                self.handler.onSend(bufFromVec(vec));
+            self.send_list.clearAndFree(self.allocator);
+            // buffers in send_iov
+            for (self.send_iov[0..self.iovlen]) |vec|
+                self.handler.onSend(bufFromVec(vec));
         }
 
         /// Zero copy send it is callers responsibility to ensure lifetime of
@@ -363,7 +432,7 @@ pub fn BufferedConn(Handler: type) type {
                 return;
             }
 
-            try self.send_list.append(vec);
+            try self.send_list.append(self.allocator, vec);
             errdefer _ = self.send_list.pop(); // reset send_list on error
             try self.sendPending();
         }
@@ -376,7 +445,7 @@ pub fn BufferedConn(Handler: type) type {
                 for (bufs) |buf| self.handler.onSend(buf);
                 return;
             }
-            try self.send_list.ensureUnusedCapacity(bufs.len);
+            try self.send_list.ensureUnusedCapacity(self.allocator, bufs.len);
 
             const send_list_len = self.send_list.items.len;
             for (bufs) |buf| if (buf.len > 0)
@@ -419,20 +488,16 @@ pub fn BufferedConn(Handler: type) type {
             for (iov) |vec|
                 self.handler.onSend(bufFromVec(vec));
             if (err == null)
-                self.sendPending() catch {};
+                self.sendPending() catch |e| {
+                    self.onError(e);
+                    self.close();
+                };
         }
 
-        fn onRecv(self: *Self, bytes: []u8) void {
-            self.onRecv_(bytes) catch |err| {
-                self.onError(err);
-                self.close();
-            };
-        }
-
-        fn onRecv_(self: *Self, bytes: []u8) !void {
-            const buf = try self.recv_buf.append(bytes);
-            const n = self.handler.onRecv(buf);
-            try self.recv_buf.set(buf[n..]);
+        fn onRecv(self: *Self, bytes: []u8) !void {
+            const buf = try self.recv_buf.append(self.allocator, bytes);
+            const n = try self.handler.onRecv(buf);
+            try self.recv_buf.set(self.allocator, buf[n..]);
         }
 
         pub fn close(self: *Self) void {
@@ -444,22 +509,9 @@ pub fn BufferedConn(Handler: type) type {
             if (@hasDecl(Handler, "onClose")) self.handler.onClose();
         }
 
-        fn clearSendList(self: *Self) void {
-            // buffers in send_list
-            for (self.send_list.items) |vec|
-                self.handler.onSend(bufFromVec(vec));
-            self.send_list.clearAndFree();
-            // buffers in send_iov
-            for (self.send_iov[0..self.iovlen]) |vec|
-                self.handler.onSend(bufFromVec(vec));
-        }
-
-        fn onConnect(self: *Self) void {
-            self.sendPending() catch |err| {
-                self.onError(err);
-                self.close();
-            };
-            if (@hasDecl(Handler, "onConnect")) self.handler.onConnect();
+        fn onConnect(self: *Self) !void {
+            try self.sendPending();
+            if (@hasDecl(Handler, "onConnect")) try self.handler.onConnect();
         }
         fn onError(self: *Self, err: anyerror) void {
             if (@hasDecl(Handler, "onError")) self.handler.onError(err);
@@ -558,55 +610,45 @@ pub fn FixedSendVec(comptime size: usize) type {
 }
 
 pub const RecvBuf = struct {
-    allocator: mem.Allocator,
     buf: []u8 = &.{},
 
     const Self = @This();
 
-    pub fn init(allocator: mem.Allocator) Self {
-        return .{ .allocator = allocator };
-    }
+    pub const empty: Self = .{};
 
-    pub fn free(self: *Self) void {
-        self.allocator.free(self.buf);
+    pub fn free(self: *Self, allocator: mem.Allocator) void {
+        if (self.buf.len == 0) return;
+        allocator.free(self.buf);
         self.buf = &.{};
     }
 
-    pub fn append(self: *Self, bytes: []u8) ![]u8 {
+    pub fn append(self: *Self, allocator: mem.Allocator, bytes: []u8) ![]u8 {
         if (self.buf.len == 0) return bytes;
         const old_len = self.buf.len;
-        self.buf = try self.allocator.realloc(self.buf, old_len + bytes.len);
+        self.buf = try allocator.realloc(self.buf, old_len + bytes.len);
         @memcpy(self.buf[old_len..], bytes);
         return self.buf;
     }
 
-    pub fn set(self: *Self, bytes: []const u8) !void {
-        if (bytes.len == 0) return self.free();
+    pub fn set(self: *Self, allocator: mem.Allocator, bytes: []const u8) !void {
+        if (bytes.len == 0) return self.free(allocator);
         if (self.buf.len == bytes.len and self.buf.ptr == bytes.ptr) return;
 
-        const new_buf = try self.allocator.dupe(u8, bytes);
-        self.free();
+        const new_buf = try allocator.dupe(u8, bytes);
+        self.free(allocator);
         self.buf = new_buf;
-    }
-
-    pub fn remove(self: *Self, n: usize) !void {
-        if (self.buf.len == 0) return;
-        const new_len = self.buf.len - n;
-        self.buf = try self.allocator.realloc(self.buf, new_len);
     }
 };
 
-test "recv_buf remove" {
-    var recv_buf = RecvBuf.init(testing.allocator);
-    defer recv_buf.free();
+test "recv_buf set/append" {
+    const gpa = testing.allocator;
+    var recv_buf: RecvBuf = .empty;
+    defer recv_buf.free(gpa);
 
-    try recv_buf.set("iso medo u ducan ");
-    _ = try recv_buf.append(@constCast("nije reko dobar dan"));
+    try recv_buf.set(gpa, "iso medo u ducan ");
+    _ = try recv_buf.append(gpa, @constCast("nije reko dobar dan"));
     try testing.expectEqual(36, recv_buf.buf.len);
     try testing.expectEqualStrings("iso medo u ducan nije reko dobar dan", recv_buf.buf);
-    _ = try recv_buf.remove(20);
-    try testing.expectEqual(16, recv_buf.buf.len);
-    try testing.expectEqualStrings("iso medo u ducan", recv_buf.buf);
 }
 
 pub fn listenSocket(addr: std.net.Address) !std.posix.socket_t {

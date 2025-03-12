@@ -52,20 +52,14 @@ const Handler = struct {
         self.tls.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
-        self.send() catch |err| {
-            self.onError(err);
-            self.tls.close();
-        };
+    pub fn onConnect(self: *Self) !void {
+        try self.send();
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) usize {
+    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
         if (bytes.len == self.send_len) {
             for (0..bytes.len) |i| assert(bytes[i] == @as(u8, @intCast(i % 256)));
-            self.send() catch |err| {
-                self.onError(err);
-                self.tls.close();
-            };
+            try self.send();
             log.debug("recv {} bytes", .{bytes.len});
             return bytes.len;
         }

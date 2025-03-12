@@ -50,7 +50,7 @@ const Handler = struct {
         self.ws.deinit();
     }
 
-    pub fn onConnect(self: *Self) void {
+    pub fn onConnect(self: *Self) !void {
         log.debug("{*} connected", .{self});
         // self.ws.send(.{ .data = "iso medo u ducan nije reko dobar dan" }) catch |err| {
         //     log.err("send {}", .{err});
@@ -58,7 +58,7 @@ const Handler = struct {
         // };
     }
 
-    pub fn onRecv(_: *Self, msg: io.ws.Msg) void {
+    pub fn onRecv(_: *Self, msg: io.ws.Msg) !void {
         log.debug("received: {s}", .{msg.data});
         // self.ws.close();
     }
