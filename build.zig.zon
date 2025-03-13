@@ -4,12 +4,12 @@
     .version = "0.0.0",
     .dependencies = .{
         .tls = .{
-            .url = "https://github.com/ianic/tls.zig/archive/cbcb175b9e7b23356aafd005fdd20f3f6dd80a04.tar.gz",
-            .hash = "122066fccb94e95322409d79dbe43ec0b02d1180a6825a05995cd59c80c8f99c5746",
+            .url = "https://github.com/ianic/tls.zig/archive/fcb2d8731a92c650f86299c6b48bab076bdbdc61.tar.gz",
+            .hash = "tls-0.1.0-ER2e0sL5BABMs3pNEwgp_IOQXirTAz7bwSbDlsDvxoKM",
         },
         .ws = .{
             .url = "https://github.com/ianic/websocket.zig/archive/72d1b0f425365f2a23ae213048185df6bf5a2a9e.tar.gz",
-            .hash = "122037c4dd156d43b12024ad9d1a045727c53a6c42807daaab92bf95006587a8269b",
+            .hash = "ws-0.1.0-AAAAAA5sAQA3xN0VbUOxICStnRoEVyfFOmxCgH2qq5K_",
         },
     },
     .paths = .{
