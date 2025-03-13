@@ -7,6 +7,7 @@ const tls = @import("tls");
 
 const io = @import("root.zig");
 const RecvBuf = @import("tcp.zig").RecvBuf;
+const BufferedRecv = @import("tcp.zig").BufferedRecv;
 
 pub fn Client(comptime Handler: type) type {
     return Conn(Handler, .client);
@@ -19,15 +20,15 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
     };
     return struct {
         const ConnT = @This();
-        const Tcp = io.tcp.BufferedConn(TcpFacade);
         const Lib = switch (handshake) {
             .client => tls.asyn.Client(LibFacade),
             .server => tls.asyn.Server(LibFacade),
         };
 
-        allocator: mem.Allocator,
         handler: *Handler,
-        tcp: Tcp,
+        allocator: mem.Allocator,
+        buf_recv: BufferedRecv(Handler),
+        tcp: io.tcp.BufferedConn(TcpFacade),
         lib: Lib,
         tcp_facade: TcpFacade,
         lib_facade: LibFacade,
@@ -40,12 +41,12 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
             // tcp is connected start tls handshake
             pub fn onConnect(tf: *TcpFacade) !void {
-                try tf.parent().lib.connect();
+                try tf.parent().lib.onConnect();
             }
 
             // Ciphertext bytes received from tcp, pass it to tls lib
             pub fn onRecv(tf: *TcpFacade, ciphertext: []u8) !usize {
-                return try tf.parent().lib.recv(ciphertext);
+                return try tf.parent().lib.onRecv(ciphertext);
             }
 
             // tcp connection is closed.
@@ -66,8 +67,6 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
         // Tls library callbacks hidden from ConnT public interface into
         const LibFacade = struct {
-            recv_buf: RecvBuf = .empty,
-
             inline fn parent(lf: *LibFacade) *ConnT {
                 return @alignCast(@fieldParentPtr("lib_facade", lf));
             }
@@ -76,16 +75,17 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             pub fn onConnect(lf: *LibFacade) void {
                 if (@hasDecl(Handler, "onConnect")) {
                     const conn = lf.parent();
-                    conn.handler.onConnect() catch |err| conn.closeErr(err);
+                    conn.handler.onConnect() catch |err| {
+                        if (@hasDecl(Handler, "onError")) conn.handler.onError(err);
+                        conn.tcp.close();
+                    };
                 }
             }
 
             // decrypted cleartext from tls lib
-            pub fn onRecv(lf: *LibFacade, cleartext: []u8) void {
+            pub fn onRecv(lf: *LibFacade, cleartext: []u8) !void {
                 const conn = lf.parent();
-                const buf = lf.recv_buf.append(conn.allocator, cleartext) catch |err| return conn.closeErr(err);
-                const n = conn.handler.onRecv(buf) catch |err| return conn.closeErr(err);
-                lf.recv_buf.set(conn.allocator, buf[n..]) catch |err| conn.closeErr(err);
+                try conn.buf_recv.onRecv(conn.allocator, cleartext, conn.handler);
             }
 
             // tls lib sends ciphertext
@@ -103,6 +103,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
         ) io.Error!void {
             self.* = .{
                 .allocator = allocator,
+                .buf_recv = .{},
                 .handler = handler,
                 .tcp_facade = .{},
                 .lib_facade = .{},
@@ -124,14 +125,9 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
         }
 
         pub fn deinit(self: *ConnT) void {
-            self.lib_facade.recv_buf.free(self.allocator);
+            self.buf_recv.deinit(self.allocator);
             self.tcp.deinit();
             self.lib.deinit();
-        }
-
-        fn closeErr(self: *ConnT, err: anyerror) void {
-            if (@hasDecl(Handler, "onError")) self.handler.onError(err);
-            self.tcp.close();
         }
 
         pub fn send(self: *ConnT, cleartext: []const u8) !void {

@@ -7,66 +7,55 @@ const io = @import("io.zig");
 const timer = @import("timer.zig");
 const testing = std.testing;
 
-test {
-    const Handler = struct {
-        const Self = @This();
-        conn: Conn(Self),
+pub const Options = struct {
+    reconnect: struct {
+        enabled: bool = false,
+        /// First reconnect try is immediately (0 delay), after that
+        /// delay is doubled each time to reach max delay in this number
+        /// of steps.
+        steps_to_max: u4 = 5,
+        /// Maximum reconnect delay.
+        max_delay: u32 = 1000,
+    } = .{},
+    /// If there is no bytes received for this duration (in
+    /// milliseconds) onRecvTimout callback will be called (if that
+    /// method is defined in Handler).
+    recv_idle_timeout: u32 = 60_000,
+};
 
-        // required Handler methods
-
-        // on error closes connection
-        pub fn onRecv(_: *Self, bytes: []const u8) !void {
-            _ = bytes;
-        }
-
-        //
-        pub fn onSend(_: *Self, iov: []posix.iovec_const, err: ?anyerror) void {
-            _ = iov;
-            _ = err;
-        }
-
-        pub fn onClose(_: *Self) void {}
-
-        // optional methods
-
-        // on error closes connection
-        pub fn onConnect(_: *Self) !void {}
-
-        pub fn onDisconnect(_: *Self, err: anyerror) void {
-            _ = err;
-        }
-
-        // unexpected error
-        pub fn onError(_: *Self, err: anyerror) void {
-            _ = err;
-        }
-
-        pub fn onRecvTimeout(_: *Self) void {}
-
-        // conn interface
-        //
-        // conn.accept(socket posix.socket_t) void
-        // conn.connect(addr: net.Address) void
-
-        // conn.sendReady() bool
-        // conn.send(iov: []posix.iovec_const) void
-
-        // conn.close() void
-    };
-
-    var handler: Handler = undefined;
-    handler.conn = Conn(Handler).init(undefined, &handler, undefined);
-}
-
+/// Basic tcp connection. After init call accept with tcp server accepted socket
+/// or connect with address to connect to.
+///
+/// Interface:
+///   accept(posix.socket_t) void      - init server connection
+///   connect(net.Address) void        - start client connection
+///   send(iov: []iovec_const) void    - send data
+///   sendReady() bool                 - only one send operation at a time
+///   conn.close() void                - close tcp connection
+///
+/// Required Handler callbacks:
+///   onRecv([]const u8) !void         - data received
+///   onSend([]iovec_const, ?anyerror) - send done, buffers released
+///   onClose()                        - cleanup done, safe to deinit
+/// Optional:
+///   onConnect() !void                - tcp connection established
+///   onDisconnect()                   - connection disrupted
+///   onError(anyerror)                - unexpected error
+///   onRecvTimeout()                  - timeout on receive (time to send application ping)
+///
+/// Error returned in onRecv/onConnect callbacks will close connection.
+///
 pub fn Conn(comptime Handler: type) type {
     return struct {
         const Self = @This();
 
         io_loop: *io.Loop,
         handler: *Handler,
-        socket: posix.socket_t = 0,
         state: State = .closed,
+        socket: posix.socket_t = 0,
+        address: ?net.Address = null,
 
+        timer_op: ?timer.Op = null,
         connect_op: io.Op = .{},
         close_op: io.Op = .{},
         recv_op: io.Op = .{},
@@ -82,29 +71,16 @@ pub fn Conn(comptime Handler: type) type {
             .flags = 0,
         },
 
-        timer_op: ?timer.Op = null,
-        address: ?net.Address = null,
         options: Options = .{},
+        /// Number of consecutive reconnect, use this in onDisconnect to decide
+        /// when it is enough.
         reconnect_count: usize = 0,
+        /// Current reconnect delay, it will double in each cycle
         reconnect_delay: u32 = 0,
-        recv_count: usize = 0, // number of recv since last timeout
-        recv_timeout_count: usize = 0, // number of consecutive timeouts
-
-        pub const Options = struct {
-            reconnect: struct {
-                enabled: bool = false,
-                /// First reconnect try is immediately (0 delay), after that
-                /// delay is doubled each time to reach max delay in this number
-                /// of steps.
-                steps_to_max: u4 = 5,
-                /// Maximum reconnect delay.
-                max_delay: u32 = 1000,
-            } = .{},
-            /// If there is no bytes received for this duration (in
-            /// milliseconds) onRecvTimout callback will be called (if that
-            /// method is defined in Handler).
-            recv_idle_timeout: u32 = 60_000,
-        };
+        /// Number of recv since last timeout
+        recv_count: usize = 0,
+        /// Number of consecutive timeouts
+        recv_timeout_count: usize = 0,
 
         const State = enum {
             closed,
@@ -125,7 +101,13 @@ pub fn Conn(comptime Handler: type) type {
             if (self.timer_op) |*op| op.deinit();
         }
 
+        /// Open connection on socket accepted by tcp server.
         pub fn accept(self: *Self, socket: posix.socket_t) void {
+            assert(self.state == .closed);
+            self.open(socket);
+        }
+
+        fn open(self: *Self, socket: posix.socket_t) void {
             assert(self.socket == 0);
             self.socket = socket;
             self.state = .open;
@@ -133,16 +115,18 @@ pub fn Conn(comptime Handler: type) type {
             // Start multishot receive
             self.recv_op = io.Op.recv(self.socket, self, onRecv, onRecvFail);
             self.io_loop.submit(&self.recv_op);
+            if (@hasDecl(Handler, "onRecvTimeout") and self.options.recv_idle_timeout > 0)
+                self.setTimer(self.options.recv_idle_timeout) catch {};
+            // Raise onConnect event
             if (@hasDecl(Handler, "onConnect")) {
                 self.handler.onConnect() catch |err| {
                     if (@hasDecl(Handler, "onError")) self.handler.onError(err);
                     return self.close();
                 };
             }
-            if (@hasDecl(Handler, "onRecvTimeout") and self.options.recv_idle_timeout > 0)
-                self.setTimer(self.options.recv_idle_timeout) catch {};
         }
 
+        /// Connect to the remote tcp server. Use options in init to configure retries.
         pub fn connect(self: *Self, address: net.Address) void {
             assert(self.state == .closed);
             self.address = address;
@@ -206,43 +190,38 @@ pub fn Conn(comptime Handler: type) type {
             return timer.infinite;
         }
 
+        /// Successful connect callback
         fn onConnect(self: *Self, socket: posix.socket_t) io.Error!void {
             if (self.state == .closing) return self.closeOrReconnect();
             assert(self.state == .connecting);
             self.reconnect_count = 0;
-            self.accept(socket);
+            self.open(socket);
         }
 
+        /// Failed connect callback
         fn onConnectFail(self: *Self, err: anyerror) void {
             if (self.state == .closing) return self.closeOrReconnect();
             assert(self.state == .connecting);
             if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
-            switch (err) {
-                // Retriable errors: https://man7.org/linux/man-pages/man2/connect.2.html
-                error.ConnectionRefused, // ECONNREFUSED
-                error.OperationNowInProgress, // EINPROGRESS
-                error.InterruptedSystemCall, // EINTR
-                error.TransportEndpointIsAlreadyConnected, // EISCONN
-                error.NetworkIsUnreachable, // ENETUNREACH
-                error.NoRouteToHost, // EHOSTUNREACH
-                error.ConnectionTimedOut, // ETIMEDOUT
-                error.OperationCanceled, // ECANCELED
-                error.OperationAlreadyInProgress, // EALREADY
-                error.TryAgain, // EAGAIN
-                => self.connectSchedule(),
-                // Not retriable error
-                else => return self.close(),
-            }
-        }
-
-        pub fn sendReady(self: *Self) bool {
-            return self.state == .open and !self.send_op.active();
+            if (self.options.reconnect.enabled)
+                self.connectSchedule()
+            else
+                self.close();
         }
 
         pub fn sendActive(self: *Self) bool {
             return self.send_op.active();
         }
 
+        /// Only one send operation can be submitted at a time.
+        pub fn sendReady(self: *Self) bool {
+            return self.state == .open and !self.send_op.active();
+        }
+
+        /// Prepare vectored send operation. When all data is copied to the
+        /// kernel buffers, or the operations is failed, handler.onSend will be
+        /// called. Buffers in the iov has to have lifetame at least until
+        /// handler.onSend is called.
         pub fn send(self: *Self, iov: []posix.iovec_const) void {
             assert(self.sendReady());
             if (iov.len == 0) return;
@@ -261,10 +240,12 @@ pub fn Conn(comptime Handler: type) type {
             self.handler.onSend(self.send_iov, err);
         }
 
+        /// Successful send callback
         fn onSend(self: *Self) io.Error!void {
             self.sendCompleted(null);
         }
 
+        /// Failed send callback
         fn onSendFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
                 error.BrokenPipe, error.ConnectionResetByPeer, error.OperationCanceled => {},
@@ -276,6 +257,7 @@ pub fn Conn(comptime Handler: type) type {
             self.disconnected(err);
         }
 
+        /// Successful recv callback
         fn onRecv(self: *Self, bytes: []u8) io.Error!void {
             self.recv_count += 1;
             self.recv_timeout_count = 0;
@@ -288,6 +270,7 @@ pub fn Conn(comptime Handler: type) type {
                 self.io_loop.submit(&self.recv_op);
         }
 
+        /// Failed recv callback
         fn onRecvFail(self: *Self, err: anyerror) io.Error!void {
             switch (err) {
                 error.EndOfFile, error.ConnectionResetByPeer, error.OperationCanceled => {},
@@ -296,6 +279,8 @@ pub fn Conn(comptime Handler: type) type {
             self.disconnected(err);
         }
 
+        /// Close tcp connection. Caller should wait for handler.onClose to
+        /// deinit this.
         pub fn close(self: *Self) void {
             if (self.state == .closed) return;
             if (self.state == .closing) return;
@@ -303,17 +288,13 @@ pub fn Conn(comptime Handler: type) type {
             self.closeOrReconnect();
         }
 
-        pub fn reconnect(self: *Self) void {
-            if (self.state == .closed) return;
-            if (self.state == .open)
-                self.state = if (self.address != null and self.options.reconnect.enabled) .connecting else .closing;
-            self.closeOrReconnect();
-        }
-
         fn onCancel(self: *Self, _: ?anyerror) void {
             self.closeOrReconnect();
         }
 
+        /// Submit cancel/close on pending operations/open socket. Completed
+        /// operations will again call this function. When all is closed it will
+        /// proceed to close or reconnect.
         fn closeOrReconnect(self: *Self) void {
             // std.debug.print(
             //     "closeOrReconnect {} {} {} {}\n",
@@ -356,6 +337,13 @@ pub fn Conn(comptime Handler: type) type {
                 self.handler.onDisconnect(err);
             self.reconnect();
         }
+
+        fn reconnect(self: *Self) void {
+            if (self.state == .closed) return;
+            if (self.state == .open)
+                self.state = if (self.address != null and self.options.reconnect.enabled) .connecting else .closing;
+            self.closeOrReconnect();
+        }
     };
 }
 
@@ -366,7 +354,7 @@ pub fn BufferedConn(Handler: type) type {
         allocator: mem.Allocator,
         conn: Conn(Self),
         handler: *Handler,
-        recv_buf: RecvBuf,
+        buf_recv: BufferedRecv(Handler),
         send_list: std.ArrayListUnmanaged(posix.iovec_const), // pending send buffers
         send_iov: []posix.iovec_const = &.{},
         iovlen: usize = 0,
@@ -376,13 +364,13 @@ pub fn BufferedConn(Handler: type) type {
             allocator: mem.Allocator,
             io_loop: *io.Loop,
             handler: *Handler,
-            options: Conn(Self).Options,
+            options: Options,
         ) void {
             self.* = .{
                 .allocator = allocator,
                 .conn = Conn(Self).init(io_loop, self, options),
                 .send_list = .empty,
-                .recv_buf = .empty,
+                .buf_recv = .{},
                 .handler = handler,
                 .send_iov = &.{},
             };
@@ -400,7 +388,7 @@ pub fn BufferedConn(Handler: type) type {
             self.clearSendList();
             self.send_list.deinit(self.allocator);
             self.allocator.free(self.send_iov);
-            self.recv_buf.free(self.allocator);
+            self.buf_recv.deinit(self.allocator);
             self.conn.deinit();
             self.* = undefined;
         }
@@ -495,9 +483,7 @@ pub fn BufferedConn(Handler: type) type {
         }
 
         fn onRecv(self: *Self, bytes: []u8) !void {
-            const buf = try self.recv_buf.append(self.allocator, bytes);
-            const n = try self.handler.onRecv(buf);
-            try self.recv_buf.set(self.allocator, buf[n..]);
+            try self.buf_recv.onRecv(self.allocator, bytes, self.handler);
         }
 
         pub fn close(self: *Self) void {
@@ -609,46 +595,45 @@ pub fn FixedSendVec(comptime size: usize) type {
     };
 }
 
-pub const RecvBuf = struct {
-    buf: []u8 = &.{},
+pub fn BufferedRecv(comptime Handler: type) type {
+    return struct {
+        const Self = @This();
 
-    const Self = @This();
+        buf: []u8 = &.{},
 
-    pub const empty: Self = .{};
+        pub fn deinit(self: *Self, allocator: mem.Allocator) void {
+            self.free(allocator);
+        }
 
-    pub fn free(self: *Self, allocator: mem.Allocator) void {
-        if (self.buf.len == 0) return;
-        allocator.free(self.buf);
-        self.buf = &.{};
-    }
+        fn free(self: *Self, allocator: mem.Allocator) void {
+            if (self.buf.len == 0) return;
+            allocator.free(self.buf);
+            self.buf = &.{};
+        }
 
-    pub fn append(self: *Self, allocator: mem.Allocator, bytes: []u8) ![]u8 {
-        if (self.buf.len == 0) return bytes;
-        const old_len = self.buf.len;
-        self.buf = try allocator.realloc(self.buf, old_len + bytes.len);
-        @memcpy(self.buf[old_len..], bytes);
-        return self.buf;
-    }
+        fn append(self: *Self, allocator: mem.Allocator, bytes: []u8) ![]u8 {
+            if (self.buf.len == 0) return bytes;
+            const old_len = self.buf.len;
+            self.buf = try allocator.realloc(self.buf, old_len + bytes.len);
+            @memcpy(self.buf[old_len..], bytes);
+            return self.buf;
+        }
 
-    pub fn set(self: *Self, allocator: mem.Allocator, bytes: []const u8) !void {
-        if (bytes.len == 0) return self.free(allocator);
-        if (self.buf.len == bytes.len and self.buf.ptr == bytes.ptr) return;
+        fn set(self: *Self, allocator: mem.Allocator, bytes: []const u8) !void {
+            if (bytes.len == 0) return self.free(allocator);
+            if (self.buf.len == bytes.len and self.buf.ptr == bytes.ptr) return;
 
-        const new_buf = try allocator.dupe(u8, bytes);
-        self.free(allocator);
-        self.buf = new_buf;
-    }
-};
+            const new_buf = try allocator.dupe(u8, bytes);
+            self.free(allocator);
+            self.buf = new_buf;
+        }
 
-test "recv_buf set/append" {
-    const gpa = testing.allocator;
-    var recv_buf: RecvBuf = .empty;
-    defer recv_buf.free(gpa);
-
-    try recv_buf.set(gpa, "iso medo u ducan ");
-    _ = try recv_buf.append(gpa, @constCast("nije reko dobar dan"));
-    try testing.expectEqual(36, recv_buf.buf.len);
-    try testing.expectEqualStrings("iso medo u ducan nije reko dobar dan", recv_buf.buf);
+        pub fn onRecv(self: *Self, allocator: mem.Allocator, bytes: []u8, handler: *Handler) !void {
+            const buf = try self.append(allocator, bytes);
+            const n = try handler.onRecv(buf);
+            try self.set(allocator, buf[n..]);
+        }
+    };
 }
 
 pub fn listenSocket(addr: std.net.Address) !std.posix.socket_t {
