@@ -33,29 +33,29 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
         tcp_facade: TcpFacade,
         lib_facade: LibFacade,
 
-        // Tcp callbacks hidden from ConnT public interface into inner struct
+        /// Tcp callbacks hidden from ConnT public interface into this inner struct.
         const TcpFacade = struct {
             inline fn parent(tf: *TcpFacade) *ConnT {
                 return @alignCast(@fieldParentPtr("tcp_facade", tf));
             }
 
-            // tcp is connected start tls handshake
+            /// Notification that tcp is connected: start tls handshake
             pub fn onConnect(tf: *TcpFacade) !void {
                 try tf.parent().lib.onConnect();
             }
 
-            // Ciphertext bytes received from tcp, pass it to tls lib
+            /// Ciphertext bytes received from tcp, pass it to the tls lib
             pub fn onRecv(tf: *TcpFacade, ciphertext: []u8) !usize {
                 return try tf.parent().lib.onRecv(ciphertext);
             }
 
-            // tcp connection is closed.
+            /// Notification that tcp connection is closed.
             pub fn onClose(tf: *TcpFacade) void {
                 tf.parent().handler.onClose();
             }
 
-            // Ciphertext is copied to the kernel tcp buffers.
-            // Safe to release it now.
+            /// Ciphertext is copied to the kernel tcp buffers.
+            /// Safe to release it now.
             pub fn onSend(tf: *TcpFacade, ciphertext: []const u8) void {
                 tf.parent().lib.onSend(ciphertext);
             }
@@ -65,13 +65,13 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             }
         };
 
-        // Tls library callbacks hidden from ConnT public interface into
+        /// Tls library callbacks hidden from ConnT public interface.
         const LibFacade = struct {
             inline fn parent(lf: *LibFacade) *ConnT {
                 return @alignCast(@fieldParentPtr("lib_facade", lf));
             }
 
-            // tls handshake finished
+            /// Notification that tls handshake has finished.
             pub fn onConnect(lf: *LibFacade) void {
                 if (@hasDecl(Handler, "onConnect")) {
                     const conn = lf.parent();
@@ -82,15 +82,16 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
                 }
             }
 
-            // decrypted cleartext from tls lib
+            /// Passing decrypted cleartext to the handler.
+            /// Making call to handler.onRecv buffered.
             pub fn onRecv(lf: *LibFacade, cleartext: []u8) !void {
                 const conn = lf.parent();
                 try conn.buf_recv.onRecv(conn.allocator, cleartext, conn.handler);
             }
 
-            // tls lib sends ciphertext
-            pub fn sendZc(lf: *LibFacade, ciphertext: []const u8) !void {
-                try lf.parent().tcp.sendZc(ciphertext);
+            /// tls lib sends ciphertext to the tcp connection.
+            pub fn send(lf: *LibFacade, ciphertext: []const u8) !void {
+                try lf.parent().tcp.send(ciphertext);
             }
         };
 
@@ -132,11 +133,8 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
         pub fn send(self: *ConnT, cleartext: []const u8) !void {
             try self.lib.send(cleartext);
-        }
-
-        // TODO: rethink this, needed for the same interface across tls/tcp
-        pub fn sendZc(self: *ConnT, cleartext: []const u8) !void {
-            try self.send(cleartext);
+            // lib.send is copying data into ciphertext, cleartext is free here.
+            // Holding same interface as tcp, requiring handler to have onSend.
             self.handler.onSend(cleartext);
         }
 

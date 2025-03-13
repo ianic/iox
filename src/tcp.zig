@@ -347,6 +347,32 @@ pub fn Conn(comptime Handler: type) type {
     };
 }
 
+/// Conn can have only one send operation active, BufferedConn collects buffers
+/// to be sent into pending list while previous send operation is active.
+/// Removes burden of checking conn.sendReady from the Handler. Handler can send
+/// in any moment.
+///
+/// Receive is also buffered, allowing handler to consume only part of the data.
+/// It now returns number of bytes consumed from the provided data. New arrivals
+/// will be appended to the unconsumed part for the following calls.
+///
+/// Interface:
+///   accept(posix.socket_t) void      - init server connection
+///   connect(net.Address) void        - start client connection
+///   send([]const u8) void            - send buffer
+///   sendv([][]const u8) void         - vectored send
+///   conn.close() void                - close tcp connection
+///
+/// Required Handler callbacks:
+///   onRecv([]const u8) !usize        - data received, returns number of bytes consumed
+///   onSend([]const u8, ?anyerror)    - send done, buffer released
+///   onClose()                        - cleanup done, safe to deinit
+/// Optional:
+///   onConnect() !void                - tcp connection established
+///   onDisconnect()                   - connection disrupted
+///   onError(anyerror)                - unexpected error
+///   onRecvTimeout()                  - timeout on receive (time to send application ping)
+///
 pub fn BufferedConn(Handler: type) type {
     return struct {
         const Self = @This();
@@ -355,8 +381,11 @@ pub fn BufferedConn(Handler: type) type {
         conn: Conn(Self),
         handler: *Handler,
         buf_recv: BufferedRecv(Handler),
-        send_list: std.ArrayListUnmanaged(posix.iovec_const), // pending send buffers
+        /// pending send buffers
+        pending: std.ArrayListUnmanaged(posix.iovec_const),
+        /// growable buffers for conn.send
         send_iov: []posix.iovec_const = &.{},
+        /// number of send_iov buffers currently in the kernel
         iovlen: usize = 0,
 
         pub fn init(
@@ -369,43 +398,45 @@ pub fn BufferedConn(Handler: type) type {
             self.* = .{
                 .allocator = allocator,
                 .conn = Conn(Self).init(io_loop, self, options),
-                .send_list = .empty,
+                .pending = .empty,
                 .buf_recv = .{},
                 .handler = handler,
                 .send_iov = &.{},
             };
         }
 
-        pub fn accept(self: *Self, socket: posix.socket_t) void {
-            self.conn.accept(socket);
-        }
-
-        pub fn connect(self: *Self, address: net.Address) void {
-            self.conn.connect(address);
-        }
-
         pub fn deinit(self: *Self) void {
             self.clearSendList();
-            self.send_list.deinit(self.allocator);
+            self.pending.deinit(self.allocator);
             self.allocator.free(self.send_iov);
             self.buf_recv.deinit(self.allocator);
             self.conn.deinit();
             self.* = undefined;
         }
 
+        /// Open connection on socket accepted by tcp server.
+        pub fn accept(self: *Self, socket: posix.socket_t) void {
+            self.conn.accept(socket);
+        }
+
+        /// Connect to the remote tcp server. Use options in init to configure retries.
+        pub fn connect(self: *Self, address: net.Address) void {
+            self.conn.connect(address);
+        }
+
         fn clearSendList(self: *Self) void {
-            // buffers in send_list
-            for (self.send_list.items) |vec|
+            // buffers in pending
+            for (self.pending.items) |vec|
                 self.handler.onSend(bufFromVec(vec));
-            self.send_list.clearAndFree(self.allocator);
+            self.pending.clearAndFree(self.allocator);
             // buffers in send_iov
             for (self.send_iov[0..self.iovlen]) |vec|
                 self.handler.onSend(bufFromVec(vec));
         }
 
-        /// Zero copy send it is callers responsibility to ensure lifetime of
-        /// `buf` until `onSend(buf)` is called.
-        pub fn sendZc(self: *Self, buf: []const u8) io.Error!void {
+        /// Send data. It is callers responsibility to ensure lifetime of
+        /// buf until handler.onSend(buf) is called.
+        pub fn send(self: *Self, buf: []const u8) io.Error!void {
             if (self.conn.state == .closed)
                 return self.handler.onSend(buf);
             if (buf.len == 0)
@@ -413,46 +444,46 @@ pub fn BufferedConn(Handler: type) type {
             const vec = vecFromBuf(buf);
 
             // optimization
-            if (self.conn.sendReady() and self.send_iov.len > 0 and self.send_list.items.len == 0) {
+            if (self.conn.sendReady() and self.send_iov.len > 0 and self.pending.items.len == 0) {
                 self.iovlen = 1;
                 self.send_iov[0] = vec;
                 self.conn.send(self.send_iov[0..self.iovlen]);
                 return;
             }
 
-            try self.send_list.append(self.allocator, vec);
-            errdefer _ = self.send_list.pop(); // reset send_list on error
+            try self.pending.append(self.allocator, vec);
+            errdefer _ = self.pending.pop(); // reset on error
             try self.sendPending();
         }
 
-        /// Vectorized zero copy send.
+        /// Vectored send.
         /// Example:
-        ///   sendVZc(&[_][]const u8{buf1, buf2, buf3});
-        pub fn sendVZc(self: *Self, bufs: []const []const u8) io.Error!void {
+        ///   sendv(&[_][]const u8{buf1, buf2, buf3});
+        pub fn sendv(self: *Self, bufs: []const []const u8) io.Error!void {
             if (self.conn.state == .closed) {
                 for (bufs) |buf| self.handler.onSend(buf);
                 return;
             }
-            try self.send_list.ensureUnusedCapacity(self.allocator, bufs.len);
+            try self.pending.ensureUnusedCapacity(self.allocator, bufs.len);
 
-            const send_list_len = self.send_list.items.len;
+            const before_len = self.pending.items.len;
             for (bufs) |buf| if (buf.len > 0)
-                self.send_list.appendAssumeCapacity(vecFromBuf(buf));
+                self.pending.appendAssumeCapacity(vecFromBuf(buf));
 
-            errdefer self.send_list.items.len = send_list_len; // reset send_list
+            errdefer self.pending.items.len = before_len;
             try self.sendPending();
         }
 
-        /// Start send operation for buffers accumulated in send_list.
+        /// Start send operation for buffers accumulated in pending.
         fn sendPending(self: *Self) !void {
-            if (!self.conn.sendReady() or self.send_list.items.len == 0) return;
+            if (!self.conn.sendReady() or self.pending.items.len == 0) return;
             self.conn.send(try self.prepareIov());
         }
 
-        // Move send_list buffers to send_iov. send_list can accumulate new
-        // buffers while send_iov is in the kernel.
+        /// Move pending buffers to send_iov. Pending can accumulate new
+        /// buffers while send_iov is in the kernel.
         fn prepareIov(self: *Self) ![]posix.iovec_const {
-            const iovlen: u32 = @min(max_iov, self.send_list.items.len);
+            const iovlen: u32 = @min(max_iov, self.pending.items.len);
 
             if (self.send_iov.len < iovlen) {
                 // resize self.send_iov
@@ -462,10 +493,10 @@ pub fn BufferedConn(Handler: type) type {
                 self.send_iov = iov;
             }
             // copy from send_list to send_iov
-            @memcpy(self.send_iov[0..iovlen], self.send_list.items[0..iovlen]);
+            @memcpy(self.send_iov[0..iovlen], self.pending.items[0..iovlen]);
             // shrink self.send_list
-            mem.copyForwards(posix.iovec_const, self.send_list.items[0..], self.send_list.items[iovlen..]);
-            self.send_list.items.len -= iovlen;
+            mem.copyForwards(posix.iovec_const, self.pending.items[0..], self.pending.items[iovlen..]);
+            self.pending.items.len -= iovlen;
             self.iovlen = iovlen;
 
             return self.send_iov[0..self.iovlen];
@@ -486,25 +517,32 @@ pub fn BufferedConn(Handler: type) type {
             try self.buf_recv.onRecv(self.allocator, bytes, self.handler);
         }
 
+        /// Close tcp connection. Caller should wait for handler.onClose to
+        /// deinit this.
         pub fn close(self: *Self) void {
             self.conn.close();
         }
 
+        // Conn callbacks redirected to the Handler
+
         fn onClose(self: *Self) void {
             self.clearSendList();
-            if (@hasDecl(Handler, "onClose")) self.handler.onClose();
+            self.handler.onClose();
         }
 
         fn onConnect(self: *Self) !void {
             try self.sendPending();
             if (@hasDecl(Handler, "onConnect")) try self.handler.onConnect();
         }
+
         fn onError(self: *Self, err: anyerror) void {
             if (@hasDecl(Handler, "onError")) self.handler.onError(err);
         }
+
         fn onDisconnect(self: *Self, err: anyerror) void {
             if (@hasDecl(Handler, "onDisconnect")) self.handler.onDisconnect(err);
         }
+
         fn onRecvTimeout(self: *Self) void {
             if (@hasDecl(Handler, "onRecvTimeout")) self.handler.onRecvTimeout();
         }

@@ -72,8 +72,12 @@ const Https = struct {
 
     fn get(self: *Self) !void {
         const request = try std.fmt.allocPrint(self.allocator, "GET / HTTP/1.1\r\nHost: {s}\r\n\r\n", .{self.host});
-        defer self.allocator.free(request);
+        errdefer self.allocator.free(request);
         try self.tls.send(request);
+    }
+
+    pub fn onSend(self: *Self, buf: []const u8) void {
+        self.allocator.free(buf);
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) !usize {

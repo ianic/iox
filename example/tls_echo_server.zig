@@ -105,9 +105,13 @@ const Conn = struct {
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+        // In general case should copy bytes and release it in onSend.
+        // Using fact that tls.send is making copy.
         try self.tls.send(bytes);
         return bytes.len;
     }
+
+    pub fn onSend(_: *Self, _: []const u8) void {}
 
     /// Called by tls connection when it is closed.
     pub fn onClose(self: *Self) void {

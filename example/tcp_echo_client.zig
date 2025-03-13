@@ -76,12 +76,8 @@ const Handler = struct {
         const buf = try self.allocator.alloc(u8, self.send_len);
         errdefer self.allocator.free(buf);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
-        // log.debug("sending {} bytes", .{buf.len});
 
-        try self.tcp.sendZc(buf);
-        // example of sendVZc
-        // try self.tcp_cli.sendVZc(&[_][]const u8{buf});
-
+        try self.tcp.send(buf);
     }
 
     pub fn onSend(self: *Self, buf: []const u8) void {

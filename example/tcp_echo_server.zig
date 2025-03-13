@@ -96,7 +96,7 @@ const Conn = struct {
 
     fn send(self: *Self, bytes: []const u8) !void {
         const buf = try self.allocator.dupe(u8, bytes);
-        try self.tcp.sendZc(buf);
+        try self.tcp.send(buf);
     }
 
     pub fn onSend(self: *Self, buf: []const u8) void {

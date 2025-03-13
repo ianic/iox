@@ -35,7 +35,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
 
             pub fn sendZc(self: Transport, data: []const u8) !void {
                 switch (self) {
-                    inline else => |cli| try cli.sendZc(data),
+                    inline else => |cli| try cli.send(data),
                 }
             }
             pub fn close(self: Transport) void {

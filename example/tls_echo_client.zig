@@ -75,11 +75,15 @@ const Handler = struct {
 
         self.send_len *= 2;
         const buf = try self.allocator.alloc(u8, self.send_len);
-        defer self.allocator.free(buf);
+        errdefer self.allocator.free(buf);
         for (0..buf.len) |i| buf[i] = @intCast(i % 256);
 
         // log.debug("sending {} bytes", .{buf.len});
         try self.tls.send(buf);
+    }
+
+    pub fn onSend(self: *Self, buf: []const u8) void {
+        self.allocator.free(buf);
     }
 
     pub fn onClose(self: *Self) void {

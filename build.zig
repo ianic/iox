@@ -75,6 +75,15 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addImport("iox", lib_mod);
         setupExample(b, exe, name);
     }
+
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+
+    const docs_step = b.step("docs", "Install docs into zig-out/docs");
+    docs_step.dependOn(&install_docs.step);
 }
 
 // Copied from: https://github.com/karlseguin/mqttz/blob/master/build.zig
