@@ -2,11 +2,8 @@ const std = @import("std");
 const net = std.net;
 const mem = std.mem;
 const posix = std.posix;
-
 const tls = @import("tls");
-
 const io = @import("root.zig");
-const RecvBuf = @import("tcp.zig").RecvBuf;
 const BufferedRecv = @import("tcp.zig").BufferedRecv;
 
 pub fn Client(comptime Handler: type) type {
