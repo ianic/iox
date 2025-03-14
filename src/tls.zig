@@ -18,8 +18,8 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
     return struct {
         const ConnT = @This();
         const Lib = switch (handshake) {
-            .client => tls.asyn.Client(LibFacade),
-            .server => tls.asyn.Server(LibFacade),
+            .client => tls.asyn.Client(*LibFacade),
+            .server => tls.asyn.Server(*LibFacade),
         };
 
         handler: *Handler,
