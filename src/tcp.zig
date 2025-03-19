@@ -305,14 +305,14 @@ pub fn Conn(comptime Handler: type) type {
                 return self.io_loop.submit(&self.close_op);
             }
 
-            if (self.socket != 0 and !self.close_op.active()) {
-                self.close_op = io.Op.closeSocket(self.socket, self, onCancel);
-                self.socket = 0;
+            if (self.recv_op.active() and !self.recv_op.canceled() and !self.close_op.active()) {
+                self.close_op = io.Op.cancel(&self.recv_op, self, onCancel);
                 return self.io_loop.submit(&self.close_op);
             }
 
-            if (self.recv_op.active() and !self.recv_op.canceled() and !self.close_op.active()) {
-                self.close_op = io.Op.cancel(&self.recv_op, self, onCancel);
+            if (self.socket != 0 and !self.close_op.active()) {
+                self.close_op = io.Op.closeSocket(self.socket, self, onCancel);
+                self.socket = 0;
                 return self.io_loop.submit(&self.close_op);
             }
 
