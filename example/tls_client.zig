@@ -87,7 +87,8 @@ const Https = struct {
         if (std.ascii.endsWithIgnoreCase(
             std.mem.trimRight(u8, bytes, "\r\n"),
             "</html>",
-        ) or std.ascii.endsWithIgnoreCase(bytes, "\r\n0\r\n\r\n"))
+        ) or std.ascii.endsWithIgnoreCase(bytes, "\r\n0\r\n\r\n") or
+            std.ascii.endsWithIgnoreCase(bytes, "0\r\n\r\n"))
             self.tls.close();
 
         return bytes.len;

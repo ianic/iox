@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        exe.linkLibC();
         exe.root_module.addImport("iox", lib_mod);
         setupExample(b, exe, name);
     }

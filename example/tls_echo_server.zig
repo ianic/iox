@@ -5,6 +5,7 @@ const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
 const log = std.log.scoped(.server);
+const builtin = @import("builtin");
 
 // Start server:
 //   $ zig build && zig-out/bin/tcp_echo
@@ -13,10 +14,19 @@ const log = std.log.scoped(.server);
 // Send some text:
 //   $ echo '1\n2\n3' | nc -w 1 localhost 9000
 //
+
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator, const is_debug = gpa: {
+        break :gpa switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            .ReleaseSmall => .{ std.heap.smp_allocator, false },
+            .ReleaseFast => .{ std.heap.c_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
+    };
 
     // Use certs from tls.zig project
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
@@ -26,7 +36,11 @@ pub fn main() !void {
     const config: io.tls.config.Server = .{ .auth = &auth };
 
     var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{});
+    try io_loop.init(allocator, .{
+        //.recv_buffers = 1024,
+        //.recv_buffer_len = 1024 * 1024,
+    });
+
     defer io_loop.deinit();
 
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
@@ -34,8 +48,30 @@ pub fn main() !void {
     try server.bind(allocator, &io_loop, addr, config);
     defer server.deinit();
 
-    _ = try io_loop.run();
+    //_ = try io_loop.run();
+    var ts = io_loop.now();
+    while (true) {
+        try io_loop.tick();
+        const elapsed = io_loop.now() - ts;
+
+        if (elapsed > 10 * std.time.ns_per_s) {
+            const sec = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
+            std.debug.print("{} operations {} bytes {d:9.1} MB/s {d:9.3} GB/s \n", .{
+                stat.msgs,
+                stat.bytes,
+                @as(f64, @floatFromInt(stat.bytes)) / 1024 / 1024 / sec,
+                @as(f64, @floatFromInt(stat.bytes)) / 1024 / 1024 / 1024 / sec,
+            });
+            ts = io_loop.now();
+            stat = .{};
+        }
+    }
 }
+
+var stat = struct {
+    msgs: usize = 0,
+    bytes: usize = 0,
+}{};
 
 const ConnectionPool = io.ConnectionPool(Conn);
 const TcpServer = io.tcp.Server(Server);
@@ -74,6 +110,7 @@ const Server = struct {
     pub fn onAccept(self: *Self, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
         const conn = try self.pool.create();
         conn.* = .{
+            .allocator = self.allocator,
             .pool = &self.pool,
             .tls = undefined,
         };
@@ -93,6 +130,7 @@ const Server = struct {
 const Conn = struct {
     const Self = @This();
 
+    allocator: mem.Allocator,
     pool: *ConnectionPool,
     tls: TlsConn,
 
@@ -105,13 +143,15 @@ const Conn = struct {
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) !usize {
-        // In general case should copy bytes and release it in onSend.
-        // Using fact that tls.send is making copy.
-        try self.tls.send(bytes);
+        try self.tls.send(try self.allocator.dupe(u8, bytes));
+        stat.bytes += bytes.len;
+        stat.msgs += 1;
         return bytes.len;
     }
 
-    pub fn onSend(_: *Self, _: []const u8) void {}
+    pub fn onSend(self: *Self, buf: []const u8) void {
+        self.allocator.free(buf);
+    }
 
     /// Called by tls connection when it is closed.
     pub fn onClose(self: *Self) void {

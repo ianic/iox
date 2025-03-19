@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const io = @import("iox");
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -7,6 +8,7 @@ const posix = std.posix;
 const ConnectionPool = io.ConnectionPool(Conn);
 
 const log = std.log.scoped(.server);
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 // Start server:
 //   $ zig build && zig-out/bin/tcp_echo_server
@@ -16,21 +18,54 @@ const log = std.log.scoped(.server);
 //   $ echo '1\n2\n3' | nc -w 1 localhost 9000
 //
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator, const is_debug = gpa: {
+        break :gpa switch (builtin.mode) {
+            .Debug => .{ debug_allocator.allocator(), true },
+            else => .{ std.heap.c_allocator, false },
+            // .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            // .ReleaseSmall => .{ std.heap.smp_allocator, false },
+            // .ReleaseFast => .{ std.heap.c_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
+    };
 
     var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{});
+    try io_loop.init(allocator, .{
+        .recv_buffers = 1024,
+        .recv_buffer_len = 64 * 1024,
+    });
     defer io_loop.deinit();
 
-    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
+    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
     var server: Server = undefined;
     try server.bind(allocator, &io_loop, addr);
     defer server.deinit();
 
-    _ = try io_loop.run();
+    var ts = io_loop.now();
+    while (true) {
+        try io_loop.tick();
+        const elapsed = io_loop.now() - ts;
+
+        if (elapsed > 10 * std.time.ns_per_s) {
+            const sec = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
+            std.debug.print("{} operations {} bytes {d:9.1} MB/s {d:9.3} GB/s \n", .{
+                stat.msgs,
+                stat.bytes,
+                @as(f64, @floatFromInt(stat.bytes)) / 1024 / 1024 / sec,
+                @as(f64, @floatFromInt(stat.bytes)) / 1024 / 1024 / 1024 / sec,
+            });
+            ts = io_loop.now();
+            stat = .{};
+        }
+    }
 }
+
+var stat = struct {
+    msgs: usize = 0,
+    bytes: usize = 0,
+}{};
 
 const Server = struct {
     const Self = @This();
@@ -69,7 +104,7 @@ const Server = struct {
     }
 
     pub fn onClose(_: *Self) void {
-        log.debug("listener closed ", .{});
+        log.err("listener closed ", .{});
     }
 };
 
@@ -89,7 +124,9 @@ const Conn = struct {
     }
 
     pub fn onRecv(self: *Self, bytes: []const u8) !usize {
-        //log.debug("{*} recv {} bytes", .{ self, bytes.len });
+        stat.bytes += bytes.len;
+        stat.msgs += 1;
+        // log.debug("{*} recv {} bytes", .{ self, bytes.len });
         try self.send(bytes);
         return bytes.len;
     }
@@ -110,6 +147,7 @@ const Conn = struct {
     }
 
     pub fn onError(self: *Self, err: anyerror) void {
-        log.err("{*} on error {}", .{ self, err });
+        if (err != error.ShortSend)
+            log.err("{*} on error {}", .{ self, err });
     }
 };

@@ -4,8 +4,9 @@
     .version = "0.0.0",
     .dependencies = .{
         .tls = .{
-            .url = "https://github.com/ianic/tls.zig/archive/6c36f8c39aeefa9e469b7eaf55a40b39a04d18c3.tar.gz",
-            .hash = "tls-0.1.0-ER2e0sD5BAA5zTq-OHtp0jkwvxIVTCyE_IlIdOEBKaH8",
+            // .url = "https://github.com/ianic/tls.zig/archive/96b923fcdaa6371617154857cef7b8337778cbe2.tar.gz",
+            // .hash = "tls-0.1.0-ER2e0sn5BAAx-UVl10IKFVtursZaqgKsyA515vCUeJm-",
+            .path = "../tls.zig",
         },
         .ws = .{
             .url = "https://github.com/ianic/websocket.zig/archive/72d1b0f425365f2a23ae213048185df6bf5a2a9e.tar.gz",
