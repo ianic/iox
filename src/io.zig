@@ -529,7 +529,7 @@ pub const Op = struct {
                                 return try success(ctx);
                             } else if (cqe.flags & linux.IORING_CQE_F_MORE > 0) {
                                 if (sent_bytes < data_len) {
-                                    log.err("{} unexpected short send data: {} sent: {}", .{ op.args.sendv.socket, data_len, sent_bytes });
+                                    // log.err("{} unexpected short send data: {} sent: {}", .{ op.args.sendv.socket, data_len, sent_bytes });
                                     return fail(ctx, error.ShortSend);
                                 }
                                 return; // wait for second call with f_notif flag set
@@ -539,7 +539,7 @@ pub const Op = struct {
 
                         // While sending with MSG_WAITALL we don't expect to get short send
                         if (sent_bytes < data_len) {
-                            log.warn("{} unexpected short send data: {} sent: {}", .{ op.args.sendv.socket, data_len, sent_bytes });
+                            // log.warn("{} unexpected short send data: {} sent: {}", .{ op.args.sendv.socket, data_len, sent_bytes });
                             return fail(ctx, error.ShortSend);
                         }
 
