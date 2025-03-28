@@ -109,16 +109,13 @@ pub const Loop = struct {
     }
 
     fn initBufferGroup(self: *Loop, id: u16, count: u16, size: u32) !IoUring.BufferGroup {
-        const buffers = try self.allocator.alloc(u8, count * size);
-        errdefer self.allocator.free(buffers);
-        return try IoUring.BufferGroup.init(&self.ring, id, buffers, size, count);
+        return try IoUring.BufferGroup.init(&self.ring, self.allocator, id, size, count);
     }
 
     pub fn deinit(self: *Loop) void {
-        if (self.recv_buf_grp.buffers_count > 0) {
-            self.allocator.free(self.recv_buf_grp.buffers);
-            self.recv_buf_grp.deinit();
-        }
+        if (self.recv_buf_grp.buffers_count > 0)
+            self.recv_buf_grp.deinit(self.allocator);
+
         self.timer_queue.deinit();
         self.ring.deinit();
     }
@@ -453,10 +450,9 @@ pub const Op = struct {
                         if (n == 0)
                             return try fail(ctx, error.EndOfFile);
 
-                        const buffer_id = cqe.buffer_id() catch unreachable;
-                        const bytes = loop.recv_buf_grp.get(buffer_id)[0..n];
+                        const bytes = loop.recv_buf_grp.get(cqe) catch unreachable;
                         try success(ctx, bytes);
-                        loop.recv_buf_grp.put(buffer_id);
+                        loop.recv_buf_grp.put(cqe) catch unreachable;
                         loop.metric.recv_bytes.inc(n);
                         loop.metric.recv_buf_grp.success.inc(1);
 
