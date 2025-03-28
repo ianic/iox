@@ -35,7 +35,7 @@ pub fn main() !void {
     const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9443);
 
     var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{});
+    try io_loop.init(allocator, .{ .recv_buffers = 32 });
     defer io_loop.deinit();
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);

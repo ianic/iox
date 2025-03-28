@@ -5,9 +5,8 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 const assert = std.debug.assert;
-
 const log = std.log.scoped(.client);
-//pub const std_options = std.Options{ .log_level = .debug };
+
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main() !void {
@@ -40,11 +39,6 @@ pub fn main() !void {
         try handler.init(allocator, &io_loop, random);
         handler.tcp.connect(addr);
     }
-
-    // var handler: Handler = undefined;
-    // try handler.init(allocator, &io_loop, random);
-    // defer handler.deinit();
-    // handler.tcp.connect(addr);
 
     _ = try io_loop.run();
 
@@ -87,7 +81,7 @@ const Handler = struct {
     }
 
     pub fn onConnect(self: *Self) !void {
-        //log.debug("onConnect", .{});
+        // log.debug("onConnect", .{});
         try self.send();
     }
 

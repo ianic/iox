@@ -57,8 +57,9 @@ pub fn isTransientError(err: RunError) bool {
 pub const Options = struct {
     /// Number of io_uring sqe entries
     entries: u16 = 16 * 1024,
+
     /// Number of receive buffers
-    recv_buffers: u16 = 1024,
+    recv_buffers: u16 = 16,
     /// Length of each receive buffer in bytes
     recv_buffer_len: u32 = 64 * 1024,
 
@@ -462,6 +463,7 @@ pub const Op = struct {
                         return;
                     },
                     .NOBUFS => {
+                        // std.debug.print("NOBUFS ", .{});
                         loop.metric.recv_buf_grp.no_bufs.inc(1);
                     },
                     .INTR => {},
@@ -951,8 +953,8 @@ const Metric = struct {
         }
 
         pub fn diff(self: *Self) usize {
-            if (self.prev == initial) return self.value;
             defer self.reset();
+            if (self.prev == initial) return self.value;
             return self.value -% self.prev;
         }
 

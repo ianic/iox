@@ -18,8 +18,8 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
     return struct {
         const ConnT = @This();
         const Lib = switch (handshake) {
-            .client => tls.asyn.Client(*LibFacade),
-            .server => tls.asyn.Server(*LibFacade),
+            .client => tls.callback.Client(LibFacade),
+            .server => tls.callback.Server(LibFacade),
         };
 
         handler: *Handler,
@@ -106,7 +106,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
                 .tcp_facade = .{},
                 .lib_facade = .{},
                 .tcp = undefined,
-                .lib = Lib.init(allocator, &self.lib_facade, config) catch |err| switch (err) {
+                .lib = Lib.init(allocator, self.lib_facade, config) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => unreachable,
                 },
