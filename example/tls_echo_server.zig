@@ -35,7 +35,7 @@ pub fn main() !void {
     const config: io.tls.config.Server = .{ .auth = &auth };
 
     var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{ .recv_buffers = 32 });
+    try io_loop.init(allocator, .{});
 
     defer io_loop.deinit();
 
