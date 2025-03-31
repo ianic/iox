@@ -35,7 +35,9 @@ pub fn main() !void {
     const config: io.tls.config.Server = .{ .auth = &auth };
 
     var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{});
+    try io_loop.init(allocator, .{
+        .recv_buffers = 64,
+    });
 
     defer io_loop.deinit();
 
@@ -52,11 +54,11 @@ pub fn main() !void {
 
         if (elapsed > 10 * std.time.ns_per_s) {
             const sec = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-            std.debug.print("{} operations {} bytes {d:9.1} MB/s {d:6.3} GB/s no buffers: {} {} {d:5.3} {} {d:6.3} {d:6.3}\n", .{
-                stat.msgs,
-                stat.bytes,
-                mbs(stat.bytes, sec),
-                gbs(stat.bytes, sec),
+            std.debug.print("{} accepts {} msgs {d:6.3} GB/s no buffers: {} {} {d:5.3} {} {d:6.3} {d:6.3}\n", .{
+                server.stat.accepts,
+                server.stat.msgs,
+                gbs(server.stat.bytes, sec),
+
                 io_loop.metric.recv_buf_grp.no_bufs.diff(),
                 io_loop.metric.recv_buf_grp.success.diff(),
                 io_loop.metric.recv_buf_grp.noBufsPercent(),
@@ -66,7 +68,7 @@ pub fn main() !void {
                 gbs(io_loop.metric.recv_bytes.diff(), sec),
             });
             ts = io_loop.now();
-            stat = .{};
+            server.stat = .{};
         }
     }
 }
@@ -77,11 +79,6 @@ pub fn mbs(bytes: usize, sec: f64) f64 {
 pub fn gbs(bytes: usize, sec: f64) f64 {
     return @as(f64, @floatFromInt(bytes)) / 1024 / 1024 / 1024 / sec;
 }
-
-var stat = struct {
-    msgs: usize = 0,
-    bytes: usize = 0,
-}{};
 
 const ConnectionPool = io.ConnectionPool(Conn);
 const TcpServer = io.tcp.Server(Server);
@@ -95,6 +92,11 @@ const Server = struct {
     pool: ConnectionPool,
     tcp: TcpServer,
     config: TlsConfig,
+    stat: struct {
+        accepts: usize = 0,
+        msgs: usize = 0,
+        bytes: usize = 0,
+    } = .{},
 
     fn bind(
         self: *Self,
@@ -122,10 +124,12 @@ const Server = struct {
         conn.* = .{
             .allocator = self.allocator,
             .pool = &self.pool,
+            .server = self,
             .tls = undefined,
         };
         try conn.tls.init(self.allocator, io_loop, conn, self.config);
         conn.tls.accept(socket);
+        self.stat.accepts += 1;
     }
 
     pub fn onError(_: *Self, err: anyerror) void {
@@ -142,6 +146,7 @@ const Conn = struct {
 
     allocator: mem.Allocator,
     pool: *ConnectionPool,
+    server: *Server,
     tls: TlsConn,
 
     pub fn deinit(self: *Self) void {
@@ -154,9 +159,8 @@ const Conn = struct {
 
     pub fn onRecv(self: *Self, bytes: []const u8) !usize {
         try self.tls.send(try self.allocator.dupe(u8, bytes));
-        //try self.tls.send(bytes);
-        stat.bytes += bytes.len;
-        stat.msgs += 1;
+        self.server.stat.bytes += bytes.len;
+        self.server.stat.msgs += 1;
         return bytes.len;
     }
 

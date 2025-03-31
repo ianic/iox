@@ -22,9 +22,6 @@ pub fn main() !void {
         break :gpa switch (builtin.mode) {
             .Debug => .{ debug_allocator.allocator(), true },
             else => .{ std.heap.c_allocator, false },
-            // .ReleaseSafe => .{ debug_allocator.allocator(), true },
-            // .ReleaseSmall => .{ std.heap.smp_allocator, false },
-            // .ReleaseFast => .{ std.heap.c_allocator, false },
         };
     };
     defer if (is_debug) {
@@ -33,8 +30,7 @@ pub fn main() !void {
 
     var io_loop: io.Loop = undefined;
     try io_loop.init(allocator, .{
-        .recv_buffers = 1024,
-        .recv_buffer_len = 64 * 1024,
+        .recv_buffers = 64,
     });
     defer io_loop.deinit();
 
@@ -50,16 +46,34 @@ pub fn main() !void {
 
         if (elapsed > 10 * std.time.ns_per_s) {
             const sec = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-            std.debug.print("{} operations {} bytes {d:9.1} MB/s {d:9.3} GB/s \n", .{
-                stat.msgs,
-                stat.bytes,
-                @as(f64, @floatFromInt(stat.bytes)) / 1024 / 1024 / sec,
-                @as(f64, @floatFromInt(stat.bytes)) / 1024 / 1024 / 1024 / sec,
+            std.debug.print("msg/s: {d:8.1} c/s: {d:8.1} l/s: {d:8.1} r: {d:5.3}GB/s s: {d:5.3}GB/s no-buf: {d:5.3}% {}/{} \n", .{
+                pers(stat.msgs, sec),
+                pers(io_loop.metric.cqes.diff(), sec),
+                pers(io_loop.metric.loops.diff(), sec),
+
+                //gbs(stat.bytes, sec),
+
+                gbs(io_loop.metric.send_bytes.diff(), sec),
+                gbs(io_loop.metric.recv_bytes.diff(), sec),
+
+                io_loop.metric.recv_buf_grp.noBufsPercent(),
+                io_loop.metric.recv_buf_grp.no_bufs.diff(),
+                io_loop.metric.recv_buf_grp.success.diff(),
             });
             ts = io_loop.now();
             stat = .{};
         }
     }
+}
+
+pub fn pers(count: usize, sec: f64) f64 {
+    return @as(f64, @floatFromInt(count)) / sec;
+}
+pub fn mbs(bytes: usize, sec: f64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / 1024 / 1024 / sec;
+}
+pub fn gbs(bytes: usize, sec: f64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / 1024 / 1024 / 1024 / sec;
 }
 
 var stat = struct {
@@ -132,8 +146,7 @@ const Conn = struct {
     }
 
     fn send(self: *Self, bytes: []const u8) !void {
-        const buf = try self.allocator.dupe(u8, bytes);
-        try self.tcp.send(buf);
+        try self.tcp.send(try self.allocator.dupe(u8, bytes));
     }
 
     pub fn onSend(self: *Self, buf: []const u8) void {

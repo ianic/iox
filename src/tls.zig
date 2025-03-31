@@ -126,6 +126,7 @@ pub fn Conn(comptime Handler: type, comptime handshake: io.HandshakeKind) type {
             self.buf_recv.deinit(self.allocator);
             self.tcp.deinit();
             self.lib.deinit();
+            self.* = undefined;
         }
 
         pub fn send(self: *ConnT, cleartext: []const u8) !void {
