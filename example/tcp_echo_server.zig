@@ -39,6 +39,7 @@ pub fn main() !void {
     try server.bind(allocator, &io_loop, addr);
     defer server.deinit();
 
+    std.debug.print("  msgs/s    cqe/s   loop/s ->GB/s <-GB/s no-buf\n", .{});
     var ts = io_loop.now();
     while (true) {
         try io_loop.tick();
@@ -46,7 +47,7 @@ pub fn main() !void {
 
         if (elapsed > 10 * std.time.ns_per_s) {
             const sec = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-            std.debug.print("msg/s: {d:8.1} c/s: {d:8.1} l/s: {d:8.1} r: {d:5.3}GB/s s: {d:5.3}GB/s no-buf: {d:5.3}% {}/{} \n", .{
+            std.debug.print("{d:8.1} {d:8.1} {d:8.1}  {d:5.3}  {d:5.3} {d:5.3}% {}/{} \n", .{
                 pers(stat.msgs, sec),
                 pers(io_loop.metric.cqes.diff(), sec),
                 pers(io_loop.metric.loops.diff(), sec),

@@ -44,6 +44,7 @@ pub fn main() !void {
     const random = prng.random();
 
     buffer = try allocator.alloc(u8, msg_len_to);
+    defer allocator.free(buffer);
     random.bytes(buffer);
 
     // Start handlers
@@ -83,9 +84,11 @@ const Handler = struct {
 
     pub fn deinit(self: *Self) void {
         self.tls.deinit();
+        self.in_flight.deinit();
     }
 
     pub fn onConnect(self: *Self) !void {
+        log.debug("{*} connected", .{self});
         try self.send();
     }
 
