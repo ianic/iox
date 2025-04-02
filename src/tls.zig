@@ -28,8 +28,6 @@ pub fn Conn(comptime handshake_kind: io.HandshakeKind) type {
         pub const VTable = struct {
             /// data is received
             onRecv: *const fn (*anyopaque, []u8) anyerror!usize,
-            /// send is done, buffers can be released now
-            onSend: *const fn (*anyopaque, []const u8) void,
             /// connection closed, cleanup done, safe to deinit
             onClose: *const fn (*anyopaque) void,
 
@@ -176,6 +174,9 @@ pub fn Conn(comptime handshake_kind: io.HandshakeKind) type {
             self.tcp.accept(socket);
         }
 
+        /// Encrypt and send ciphertext to the tls peer. Cleartext buffer is
+        /// copied here, no need to be live until onSend callback like in pure
+        /// tcp connection.
         pub fn send(self: *ConnT, cleartext: []const u8) !void {
             var tls_conn = &(self.connection orelse return error.InvalidState);
             if (cleartext.len == 0) return;
@@ -189,10 +190,6 @@ pub fn Conn(comptime handshake_kind: io.HandshakeKind) type {
             assert(res.unused_cleartext.len == 0);
             assert(res.ciphertext.len == ciphertext.len);
             try self.tcp.send(ciphertext);
-
-            // Cleartext data is copied in encrypt into ciphertext, cleartext is free here.
-            // Holding same interface as tcp, requiring handler to have onSend.
-            self.vtable.onSend(self.handler, cleartext);
         }
 
         pub fn close(self: *ConnT) void {

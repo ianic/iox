@@ -135,7 +135,6 @@ const Server = struct {
         try conn.tls.init(self.allocator, io_loop, conn, .{
             .onConnect = Conn.onConnect,
             .onRecv = Conn.onRecv,
-            .onSend = Conn.onSend,
             .onError = Conn.onError,
             .onClose = Conn.onClose,
         }, self.config);
@@ -171,15 +170,10 @@ const Conn = struct {
 
     fn onRecv(ptr: *anyopaque, bytes: []const u8) !usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        try self.tls.send(try self.allocator.dupe(u8, bytes));
+        try self.tls.send(bytes);
         self.server.stat.bytes += bytes.len;
         self.server.stat.msgs += 1;
         return bytes.len;
-    }
-
-    fn onSend(ptr: *anyopaque, buf: []const u8) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        self.allocator.free(buf);
     }
 
     /// Called by tls connection when it is closed.

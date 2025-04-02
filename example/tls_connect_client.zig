@@ -45,7 +45,6 @@ pub fn main() !void {
         try handler.tls.init(allocator, &io_loop, handler, .{
             .onConnect = Handler.onConnect,
             .onRecv = Handler.onRecv,
-            .onSend = Handler.onSend,
             .onError = Handler.onError,
             .onClose = Handler.onClose,
         }, config);

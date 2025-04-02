@@ -48,7 +48,6 @@ pub fn main() !void {
     try https.tls.init(allocator, &io_loop, &https, .{
         .onConnect = Https.onConnect,
         .onRecv = Https.onRecv,
-        .onSend = Https.onSend,
         .onError = Https.onError,
         .onClose = Https.onClose,
     }, config);
@@ -79,13 +78,8 @@ const Https = struct {
 
     fn get(self: *Self) !void {
         const request = try std.fmt.allocPrint(self.allocator, "GET / HTTP/1.1\r\nHost: {s}\r\n\r\n", .{self.host});
-        errdefer self.allocator.free(request);
+        defer self.allocator.free(request);
         try self.tls.send(request);
-    }
-
-    pub fn onSend(ptr: *anyopaque, buf: []const u8) void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        self.allocator.free(buf);
     }
 
     pub fn onRecv(ptr: *anyopaque, bytes: []const u8) !usize {

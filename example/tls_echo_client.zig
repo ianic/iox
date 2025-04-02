@@ -60,7 +60,6 @@ pub fn main() !void {
         try handler.tls.init(allocator, &io_loop, handler, .{
             .onConnect = Handler.onConnect,
             .onRecv = Handler.onRecv,
-            .onSend = Handler.onSend,
             .onClose = Handler.onClose,
             .onError = Handler.onError,
         }, config);
@@ -132,11 +131,6 @@ const Handler = struct {
             self.in_flight.appendAssumeCapacity(msg);
             try self.tls.send(msg);
         }
-    }
-
-    pub fn onSend(_: *anyopaque, _: []const u8) void {
-        // no free, using fixed buffer in send
-        // self.allocator.free(buf);
     }
 
     pub fn onClose(ptr: *anyopaque) void {
