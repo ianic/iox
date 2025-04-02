@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const mem = std.mem;
 const posix = std.posix;
+const assert = std.debug.assert;
 const tls = @import("tls");
 const io = @import("root.zig");
 const BufferedRecv = @import("tcp.zig").BufferedRecv;
@@ -10,17 +11,17 @@ pub fn Client() type {
     return Conn(.client);
 }
 
-pub fn Conn(comptime handshake: io.HandshakeKind) type {
-    const Config = switch (handshake) {
+pub fn Conn(comptime handshake_kind: io.HandshakeKind) type {
+    const Config = switch (handshake_kind) {
         .client => tls.config.Client,
         .server => tls.config.Server,
     };
+    const HandshakeType = switch (handshake_kind) {
+        .client => tls.nonblock.Client,
+        .server => tls.nonblock.Server,
+    };
     return struct {
         const ConnT = @This();
-        const Lib = switch (handshake) {
-            .client => tls.callback.Client(LibFacade),
-            .server => tls.callback.Server(LibFacade),
-        };
 
         /// Handler callbacks
         /// Error returned in onRecv/onConnect callbacks will close connection.
@@ -45,36 +46,10 @@ pub fn Conn(comptime handshake: io.HandshakeKind) type {
         allocator: mem.Allocator,
         buf_recv: BufferedRecv,
         tcp: io.tcp.BufferedConn,
-        lib: Lib,
-        lib_facade: LibFacade,
 
-        /// Tls library callbacks hidden from ConnT public interface.
-        const LibFacade = struct {
-            inline fn parent(lf: *LibFacade) *ConnT {
-                return @alignCast(@fieldParentPtr("lib_facade", lf));
-            }
-
-            /// Notification that tls handshake has finished.
-            pub fn onConnect(lf: *LibFacade) void {
-                const conn = lf.parent();
-                if (conn.vtable.onConnect) |cb| cb(conn.handler) catch |err| {
-                    if (conn.vtable.onError) |cbe| cbe(conn.handler, err);
-                    conn.tcp.close();
-                };
-            }
-
-            /// Passing decrypted cleartext to the handler.
-            /// Making call to handler.onRecv buffered.
-            pub fn onRecv(lf: *LibFacade, cleartext: []u8) !void {
-                const conn = lf.parent();
-                try conn.buf_recv.onRecv(conn.allocator, cleartext, conn.handler, conn.vtable.onRecv);
-            }
-
-            /// tls lib sends ciphertext to the tcp connection.
-            pub fn send(lf: *LibFacade, ciphertext: []const u8) !void {
-                try lf.parent().tcp.send(ciphertext);
-            }
-        };
+        handshake: ?*HandshakeType = null,
+        connection: ?tls.nonblock.Connection = null,
+        config: Config,
 
         pub fn init(
             self: *ConnT,
@@ -89,41 +64,89 @@ pub fn Conn(comptime handshake: io.HandshakeKind) type {
                 .vtable = vtable,
                 .allocator = allocator,
                 .buf_recv = .{},
-                .lib_facade = .{},
                 .tcp = undefined,
-                .lib = Lib.init(allocator, self.lib_facade, config) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => unreachable,
-                },
+                .config = config,
             };
             self.tcp.init(allocator, io_loop, self, .{
                 .onConnect = onTcpConnect,
-                .onRecv = onTcpRecv,
+                .onRecv = onHandshakeRecv,
                 .onSend = onTcpSend,
                 .onClose = onTcpClose,
                 .onError = onTcpError,
             }, .{});
         }
 
+        pub fn deinit(self: *ConnT) void {
+            if (self.handshake) |handshake| self.allocator.destroy(handshake);
+            self.buf_recv.deinit(self.allocator);
+            self.tcp.deinit();
+            self.* = undefined;
+        }
+
+        fn handshakeRun(self: *ConnT, recv_buf: []const u8) !usize {
+            var handshake = self.handshake orelse unreachable;
+
+            var send_buf: [tls.max_ciphertext_record_len]u8 = undefined;
+            const res = try handshake.run(recv_buf, &send_buf);
+            if (res.send.len > 0) {
+                const buf = try self.allocator.dupe(u8, res.send);
+                try self.tcp.send(buf);
+            }
+
+            if (handshake.done()) {
+                self.connection = tls.nonblock.Connection.init(handshake.inner.cipher);
+                self.tcp.vtable.onRecv = onTcpRecv; // replace callback
+                self.allocator.destroy(handshake);
+                self.handshake = null;
+                // call handler onConnect
+                if (self.vtable.onConnect) |cb| cb(self.handler) catch |err| {
+                    if (self.vtable.onError) |cbe| cbe(self.handler, err);
+                    self.tcp.close();
+                };
+            }
+            return res.recv_pos;
+        }
+
         // *** tcp callbacks
+
+        /// Tcp receive callback during handshake, after handshake onTcpRecv will be used.
+        fn onHandshakeRecv(ptr: *anyopaque, ciphertext: []u8) !usize {
+            const self: *ConnT = @ptrCast(@alignCast(ptr));
+            return try self.handshakeRun(ciphertext);
+        }
 
         /// Notification that tcp is connected: start tls handshake
         fn onTcpConnect(ptr: *anyopaque) !void {
             const self: *ConnT = @ptrCast(@alignCast(ptr));
-            try self.lib.onConnect();
+            assert(self.handshake == null);
+            // init self.handshake
+            const handshake = try self.allocator.create(HandshakeType);
+            handshake.* = HandshakeType.init(self.config);
+            self.handshake = handshake;
+            self.tcp.vtable.onRecv = onHandshakeRecv;
+            // send client hello
+            if (handshake_kind == .client) _ = try self.handshakeRun(&.{});
         }
 
         /// Ciphertext bytes received from tcp, pass it to the tls lib
         fn onTcpRecv(ptr: *anyopaque, ciphertext: []u8) !usize {
             const self: *ConnT = @ptrCast(@alignCast(ptr));
-            return try self.lib.onRecv(ciphertext);
+            var tls_conn = &(self.connection orelse unreachable);
+            // decrypt
+            const res = try tls_conn.decrypt(ciphertext, ciphertext);
+            if (res.cleartext.len > 0) {
+                // send cleartext to handler, preserve unprocessed in buf_recv
+                try self.buf_recv.onRecv(self.allocator, res.cleartext, self.handler, self.vtable.onRecv);
+            }
+            if (res.closed) return error.EndOfStream;
+            return res.ciphertext_pos;
         }
 
         /// Ciphertext is copied to the kernel tcp buffers.
         /// Safe to release it now.
         fn onTcpSend(ptr: *anyopaque, ciphertext: []const u8) void {
             const self: *ConnT = @ptrCast(@alignCast(ptr));
-            self.lib.onSend(ciphertext);
+            self.allocator.free(ciphertext);
         }
 
         /// Notification that tcp connection is closed.
@@ -148,16 +171,21 @@ pub fn Conn(comptime handshake: io.HandshakeKind) type {
             self.tcp.accept(socket);
         }
 
-        pub fn deinit(self: *ConnT) void {
-            self.buf_recv.deinit(self.allocator);
-            self.tcp.deinit();
-            self.lib.deinit();
-            self.* = undefined;
-        }
-
         pub fn send(self: *ConnT, cleartext: []const u8) !void {
-            try self.lib.send(cleartext);
-            // lib.send is copying data into ciphertext, cleartext is free here.
+            var tls_conn = &(self.connection orelse return error.InvalidState);
+            if (cleartext.len == 0) return;
+
+            // Allocate ciphertext buffer
+            const ciphertext = try self.allocator.alloc(u8, tls_conn.encryptedLength(cleartext.len));
+            errdefer self.allocator.free(ciphertext);
+            // Fill ciphertext with encrypted tls records
+            const res = try tls_conn.encrypt(cleartext, ciphertext);
+            assert(res.cleartext_pos == cleartext.len);
+            assert(res.unused_cleartext.len == 0);
+            assert(res.ciphertext.len == ciphertext.len);
+            try self.tcp.send(ciphertext);
+
+            // Cleartext data is copied in encrypt into ciphertext, cleartext is free here.
             // Holding same interface as tcp, requiring handler to have onSend.
             self.vtable.onSend(self.handler, cleartext);
         }
