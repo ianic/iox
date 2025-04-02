@@ -41,13 +41,15 @@ pub fn main() !void {
     // Start handlers
     var handlers: [1024]Handler = undefined;
     for (&handlers) |*handler| {
-        handler.* = .{
-            .allocator = allocator,
-            .io_loop = &io_loop,
-            .config = config,
-            .addr = addr,
-        };
-        try handler.connect();
+        handler.* = .{ .addr = addr };
+        try handler.tls.init(allocator, &io_loop, handler, .{
+            .onConnect = Handler.onConnect,
+            .onRecv = Handler.onRecv,
+            .onSend = Handler.onSend,
+            .onError = Handler.onError,
+            .onClose = Handler.onClose,
+        }, config);
+        handler.tls.connect(addr);
     }
 
     _ = try io_loop.run();
@@ -61,23 +63,9 @@ pub fn main() !void {
 const Handler = struct {
     const Self = @This();
 
-    allocator: mem.Allocator,
-    io_loop: *io.Loop,
-    config: io.tls.config.Client,
     addr: net.Address,
 
     tls: io.tls.Client() = undefined,
-
-    pub fn connect(self: *Self) !void {
-        try self.tls.init(self.allocator, self.io_loop, self, .{
-            .onConnect = onConnect,
-            .onRecv = onRecv,
-            .onSend = onSend,
-            .onError = onError,
-            .onClose = onClose,
-        }, self.config);
-        self.tls.connect(self.addr);
-    }
 
     pub fn deinit(self: *Self) void {
         self.tls.deinit();
@@ -98,8 +86,7 @@ const Handler = struct {
 
     pub fn onClose(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.tls.deinit();
-        self.connect() catch unreachable;
+        self.tls.connect(self.addr);
     }
 
     pub fn onError(ptr: *anyopaque, err: anyerror) void {

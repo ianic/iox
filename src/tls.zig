@@ -77,7 +77,7 @@ pub fn Conn(comptime handshake_kind: io.HandshakeKind) type {
         }
 
         pub fn deinit(self: *ConnT) void {
-            if (self.handshake) |handshake| self.allocator.destroy(handshake);
+            if (self.handshake) |h| self.allocator.destroy(h);
             self.buf_recv.deinit(self.allocator);
             self.tcp.deinit();
             self.* = undefined;
@@ -152,6 +152,11 @@ pub fn Conn(comptime handshake_kind: io.HandshakeKind) type {
         /// Notification that tcp connection is closed.
         fn onTcpClose(ptr: *anyopaque) void {
             const self: *ConnT = @ptrCast(@alignCast(ptr));
+            self.connection = null;
+            if (self.handshake) |h| {
+                self.allocator.destroy(h);
+                self.handshake = null;
+            }
             self.vtable.onClose(self.handler);
         }
 

@@ -421,20 +421,15 @@ pub const BufferedConn = struct {
         self.* = .{
             .handler = handler,
             .vtable = vtable,
-            .conn = Conn.init(
-                io_loop,
-                self,
-                .{
-                    .onRecv = Self.onRecv,
-                    .onSend = Self.onSend,
-                    .onClose = Self.onClose,
-                    .onConnect = Self.onConnect,
-                    .onDisconnect = vtable.onDisconnect,
-                    .onError = vtable.onError,
-                    .onRecvTimeout = vtable.onRecvTimeout,
-                },
-                options,
-            ),
+            .conn = Conn.init(io_loop, self, .{
+                .onRecv = Self.onRecv,
+                .onSend = Self.onSend,
+                .onClose = Self.onClose,
+                .onConnect = Self.onConnect,
+                .onDisconnect = Self.onDisconnect,
+                .onError = Self.onError,
+                .onRecvTimeout = Self.onRecvTimeout,
+            }, options),
             .allocator = allocator,
             .pending = .empty,
             .buf_recv = .{},
@@ -539,8 +534,8 @@ pub const BufferedConn = struct {
         return self.send_iov[0..self.iovlen];
     }
 
-    fn onSend(context: *anyopaque, iov: []posix.iovec_const, err: ?anyerror) void {
-        const self: *Self = @ptrCast(@alignCast(context));
+    fn onSend(ptr: *anyopaque, iov: []posix.iovec_const, err: ?anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.iovlen = 0;
         for (iov) |vec|
             self.vtable.onSend(self.handler, bufFromVec(vec));
@@ -551,8 +546,8 @@ pub const BufferedConn = struct {
             };
     }
 
-    fn onRecv(context: *anyopaque, bytes: []u8) anyerror!void {
-        const self: *Self = @ptrCast(@alignCast(context));
+    fn onRecv(ptr: *anyopaque, bytes: []u8) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         try self.buf_recv.onRecv(self.allocator, bytes, self.handler, self.vtable.onRecv);
     }
 
@@ -562,16 +557,32 @@ pub const BufferedConn = struct {
         self.conn.close();
     }
 
-    fn onClose(context: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(context));
+    fn onClose(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.clearSendList();
+        self.buf_recv.free(self.allocator);
         self.vtable.onClose(self.handler);
     }
 
-    fn onConnect(context: *anyopaque) anyerror!void {
-        const self: *Self = @ptrCast(@alignCast(context));
+    fn onConnect(ptr: *anyopaque) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         try self.sendPending();
         if (self.vtable.onConnect) |cb| try cb(self.handler);
+    }
+
+    fn onDisconnect(ptr: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.vtable.onDisconnect) |cb| cb(self.handler, err);
+    }
+
+    fn onError(ptr: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.vtable.onError) |cb| cb(self.handler, err);
+    }
+
+    fn onRecvTimeout(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.vtable.onRecvTimeout) |cb| cb(self.handler);
     }
 };
 
@@ -584,7 +595,7 @@ pub const Server = struct {
         onError: ?*const fn (*anyopaque, anyerror) void = null,
     };
 
-    context: *anyopaque,
+    handler: *anyopaque,
     vtable: VTable,
     socket: posix.socket_t = 0,
     io_loop: *io.Loop,
@@ -593,12 +604,12 @@ pub const Server = struct {
 
     pub fn init(
         io_loop: *io.Loop,
-        context: *anyopaque,
+        handler: *anyopaque,
         vtable: VTable,
     ) Self {
         return .{
             .io_loop = io_loop,
-            .context = context,
+            .handler = handler,
             .vtable = vtable,
         };
     }
@@ -611,14 +622,14 @@ pub const Server = struct {
     }
 
     fn onAccept(self: *Self, socket: posix.socket_t, addr: net.Address) io.Error!void {
-        try self.vtable.onAccept(self.context, self.io_loop, socket, addr);
+        try self.vtable.onAccept(self.handler, self.io_loop, socket, addr);
     }
 
     fn onAcceptFail(self: *Self, err: anyerror) io.Error!void {
         switch (err) {
             error.OperationCanceled => {},
             else => {
-                if (self.vtable.onError) |cb| cb(self.context, err);
+                if (self.vtable.onError) |cb| cb(self.handler, err);
                 self.io_loop.submit(&self.accept_op); // restart operation
             },
         }
@@ -640,7 +651,7 @@ pub const Server = struct {
             self.socket = 0;
             return self.io_loop.submit(&self.close_op);
         }
-        if (self.vtable.onClose) |cb| cb(self.context);
+        if (self.vtable.onClose) |cb| cb(self.handler);
     }
 };
 
@@ -702,11 +713,11 @@ pub const BufferedRecv = struct {
         self: *Self,
         allocator: mem.Allocator,
         bytes: []u8,
-        context: *anyopaque,
+        handler: *anyopaque,
         cb: *const fn (*anyopaque, []u8) anyerror!usize,
     ) !void {
         const buf = try self.append(allocator, bytes);
-        const n = try cb(context, buf);
+        const n = try cb(handler, buf);
         try self.set(allocator, buf[n..]);
     }
 };
@@ -744,8 +755,8 @@ test "Conn" {
             std.debug.print("onError {}\n", .{err});
         }
 
-        fn onConnect(context: *anyopaque) !void {
-            const self: *Self = @ptrCast(@alignCast(context));
+        fn onConnect(ptr: *anyopaque) !void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
             std.debug.print("onConnect\n", .{});
             assert(self.send_vec.prep("pero "));
             assert(self.send_vec.prep("zdero "));
@@ -755,8 +766,8 @@ test "Conn" {
             self.tcp.send(self.send_vec.get());
         }
 
-        fn onDisconnect(context: *anyopaque, err: anyerror) void {
-            const self: *Self = @ptrCast(@alignCast(context));
+        fn onDisconnect(ptr: *anyopaque, err: anyerror) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
             std.debug.print("onDisconnect {} {}\n", .{ err, self.tcp.reconnect_count });
             if (self.tcp.reconnect_count == 10) self.tcp.close();
         }
@@ -776,8 +787,8 @@ test "Conn" {
             std.debug.print("onClose\n", .{});
         }
 
-        fn onRecvTimeout(context: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(context));
+        fn onRecvTimeout(ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
             std.debug.print("onRecvTimeout {}\n", .{self.tcp.recv_timeout_count});
             if (self.tcp.recv_timeout_count > 3)
                 self.tcp.reconnect();
@@ -848,8 +859,8 @@ test "BufferedConn" {
             std.debug.print("onSend v: {*} {} '{s}'\n", .{ buf.ptr, buf.len, buf });
         }
 
-        pub fn onDisconnect(context: *anyopaque, err: anyerror) void {
-            const self: *Self = @ptrCast(@alignCast(context));
+        pub fn onDisconnect(ptr: *anyopaque, err: anyerror) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
             std.debug.print("onDisconnect {} {}\n", .{ err, self.tcp.conn.reconnect_count });
             if (self.tcp.conn.reconnect_count == 10) self.tcp.close();
         }
@@ -863,8 +874,8 @@ test "BufferedConn" {
             std.debug.print("onClose\n", .{});
         }
 
-        pub fn onRecvTimeout(context: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(context));
+        pub fn onRecvTimeout(ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
             std.debug.print("onRecvTimeout {}\n", .{self.tcp.conn.recv_timeout_count});
             if (self.tcp.conn.recv_timeout_count > 3)
                 self.tcp.conn.reconnect();
