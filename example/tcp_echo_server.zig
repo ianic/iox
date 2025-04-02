@@ -87,7 +87,7 @@ const Server = struct {
 
     allocator: mem.Allocator,
     pool: ConnectionPool,
-    tcp: io.tcp.Server(Self),
+    tcp: io.tcp.Server,
 
     fn bind(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop, addr: net.Address) !void {
         self.* = .{
@@ -95,7 +95,11 @@ const Server = struct {
             .pool = ConnectionPool.init(allocator),
             .tcp = undefined,
         };
-        self.tcp = .init(io_loop, self);
+        self.tcp = .init(io_loop, self, .{
+            .onAccept = Server.onAccept,
+            .onError = Server.onError,
+            .onClose = Server.onClose,
+        });
         try self.tcp.bind(addr);
     }
 
@@ -103,22 +107,35 @@ const Server = struct {
         self.pool.deinit();
     }
 
-    pub fn onAccept(self: *Self, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
+    fn onAccept(context: *anyopaque, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
+        const self: *Self = @ptrCast(@alignCast(context));
         const conn = try self.pool.create();
         conn.* = .{
             .allocator = self.allocator,
             .pool = &self.pool,
             .tcp = undefined,
         };
-        conn.tcp.init(self.allocator, io_loop, conn, .{});
+        conn.tcp.init(
+            self.allocator,
+            io_loop,
+            conn,
+            .{
+                .onRecv = Conn.onRecv,
+                .onSend = Conn.onSend,
+                .onClose = Conn.onClose,
+                .onConnect = Conn.onConnect,
+                .onError = Conn.onError,
+            },
+            .{},
+        );
         conn.tcp.accept(socket);
     }
 
-    pub fn onError(_: *Self, err: anyerror) void {
+    fn onError(_: *anyopaque, err: anyerror) void {
         log.err("listener on error {}", .{err});
     }
 
-    pub fn onClose(_: *Self) void {
+    fn onClose(_: *anyopaque) void {
         log.err("listener closed ", .{});
     }
 };
@@ -128,17 +145,19 @@ const Conn = struct {
 
     allocator: mem.Allocator,
     pool: *ConnectionPool,
-    tcp: io.tcp.BufferedConn(Self),
+    tcp: io.tcp.BufferedConn,
 
     pub fn deinit(self: *Self) void {
         self.tcp.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    pub fn onConnect(context: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(context));
         log.debug("{*} connected socket: {} ", .{ self, self.tcp.conn.socket });
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    pub fn onRecv(context: *anyopaque, bytes: []const u8) !usize {
+        const self: *Self = @ptrCast(@alignCast(context));
         stat.bytes += bytes.len;
         stat.msgs += 1;
         // log.debug("{*} recv {} bytes", .{ self, bytes.len });
@@ -150,17 +169,20 @@ const Conn = struct {
         try self.tcp.send(try self.allocator.dupe(u8, bytes));
     }
 
-    pub fn onSend(self: *Self, buf: []const u8) void {
+    pub fn onSend(context: *anyopaque, buf: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(context));
         self.allocator.free(buf);
     }
 
-    pub fn onClose(self: *Self) void {
+    pub fn onClose(context: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(context));
         log.debug("{*} closed", .{self});
         self.deinit();
         self.pool.destroy(self);
     }
 
-    pub fn onError(self: *Self, err: anyerror) void {
+    pub fn onError(context: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(context));
         if (err != error.ShortSend)
             log.err("{*} on error {}", .{ self, err });
     }

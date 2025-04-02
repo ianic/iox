@@ -53,11 +53,10 @@ pub fn main() !void {
 
 const Handler = struct {
     const Self = @This();
-    const Tcp = io.tcp.BufferedConn(Self);
+    const Tcp = io.tcp.BufferedConn;
 
     allocator: mem.Allocator,
     tcp: Tcp,
-    max_send_len: usize = msg_len_from,
     in_flight: std.ArrayList([]const u8),
 
     fn init(self: *Self, allocator: mem.Allocator, io_loop: *io.Loop) !void {
@@ -66,7 +65,13 @@ const Handler = struct {
             .tcp = undefined,
             .in_flight = try std.ArrayList([]const u8).initCapacity(allocator, 128),
         };
-        self.tcp.init(allocator, io_loop, self, .{});
+        self.tcp.init(allocator, io_loop, self, .{
+            .onRecv = Handler.onRecv,
+            .onSend = Handler.onSend,
+            .onClose = Handler.onClose,
+            .onConnect = Handler.onConnect,
+            .onError = Handler.onError,
+        }, .{});
     }
 
     fn deinit(self: *Self) void {
@@ -74,16 +79,18 @@ const Handler = struct {
         self.tcp.deinit();
     }
 
-    pub fn onError(_: *Self, err: anyerror) void {
+    fn onError(_: *anyopaque, err: anyerror) void {
         log.err("on error {}", .{err});
     }
 
-    pub fn onConnect(self: *Self) !void {
+    fn onConnect(context: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(context));
         log.debug("{*} onConnect", .{self});
         try self.send();
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    fn onRecv(context: *anyopaque, bytes: []const u8) !usize {
+        const self: *Self = @ptrCast(@alignCast(context));
         var consumed: usize = 0;
         while (self.in_flight.items.len > 0) {
             const expected_bytes = self.in_flight.items[0].len;
@@ -109,9 +116,10 @@ const Handler = struct {
         }
     }
 
-    pub fn onSend(_: *Self, _: []const u8) void {}
+    fn onSend(_: *anyopaque, _: []const u8) void {}
 
-    pub fn onClose(self: *Self) void {
+    fn onClose(context: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(context));
         log.debug("{*} closed", .{self});
     }
 };
