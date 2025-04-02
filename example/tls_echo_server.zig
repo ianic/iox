@@ -81,8 +81,8 @@ pub fn gbs(bytes: usize, sec: f64) f64 {
 }
 
 const ConnectionPool = io.ConnectionPool(Conn);
-const TcpServer = io.tcp.Server(Server);
-const TlsConn = io.tls.Conn(Conn, .server);
+const TcpServer = io.tcp.Server;
+const TlsConn = io.tls.Conn(.server);
 const TlsConfig = io.tls.config.Server;
 
 const Server = struct {
@@ -111,7 +111,11 @@ const Server = struct {
             .config = config,
             .tcp = undefined,
         };
-        self.tcp = .init(io_loop, self);
+        self.tcp = .init(io_loop, self, .{
+            .onAccept = onAccept,
+            .onClose = onClose,
+            .onError = onError,
+        });
         try self.tcp.bind(addr);
     }
 
@@ -119,7 +123,8 @@ const Server = struct {
         self.pool.deinit();
     }
 
-    pub fn onAccept(self: *Self, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
+    pub fn onAccept(ptr: *anyopaque, io_loop: *io.Loop, socket: posix.socket_t, _: net.Address) io.Error!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         const conn = try self.pool.create();
         conn.* = .{
             .allocator = self.allocator,
@@ -127,16 +132,22 @@ const Server = struct {
             .server = self,
             .tls = undefined,
         };
-        try conn.tls.init(self.allocator, io_loop, conn, self.config);
+        try conn.tls.init(self.allocator, io_loop, conn, .{
+            .onConnect = Conn.onConnect,
+            .onRecv = Conn.onRecv,
+            .onSend = Conn.onSend,
+            .onError = Conn.onError,
+            .onClose = Conn.onClose,
+        }, self.config);
         conn.tls.accept(socket);
         self.stat.accepts += 1;
     }
 
-    pub fn onError(_: *Self, err: anyerror) void {
+    pub fn onError(_: *anyopaque, err: anyerror) void {
         log.err("listener on error {}", .{err});
     }
 
-    pub fn onClose(_: *Self) void {
+    pub fn onClose(_: *anyopaque) void {
         log.debug("listener closed ", .{});
     }
 };
@@ -153,29 +164,34 @@ const Conn = struct {
         self.tls.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    fn onConnect(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.debug("{*} connected", .{self});
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    fn onRecv(ptr: *anyopaque, bytes: []const u8) !usize {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         try self.tls.send(try self.allocator.dupe(u8, bytes));
         self.server.stat.bytes += bytes.len;
         self.server.stat.msgs += 1;
         return bytes.len;
     }
 
-    pub fn onSend(self: *Self, buf: []const u8) void {
+    fn onSend(ptr: *anyopaque, buf: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.allocator.free(buf);
     }
 
     /// Called by tls connection when it is closed.
-    pub fn onClose(self: *Self) void {
+    fn onClose(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.debug("{*} closed", .{self});
         self.deinit();
         self.pool.destroy(self);
     }
 
-    pub fn onError(self: *Self, err: anyerror) void {
+    fn onError(ptr: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.err("{*} on error {}", .{ self, err });
     }
 };

@@ -57,7 +57,13 @@ pub fn main() !void {
             // Number of in flight messages of each handler
             .in_flight = try std.ArrayList([]const u8).initCapacity(allocator, 1024),
         };
-        try handler.tls.init(allocator, &io_loop, handler, config);
+        try handler.tls.init(allocator, &io_loop, handler, .{
+            .onConnect = Handler.onConnect,
+            .onRecv = Handler.onRecv,
+            .onSend = Handler.onSend,
+            .onClose = Handler.onClose,
+            .onError = Handler.onError,
+        }, config);
 
         handler.tls.connect(addr);
     }
@@ -78,7 +84,7 @@ const Handler = struct {
 
     allocator: mem.Allocator,
     random: std.Random,
-    tls: io.tls.Client(Self),
+    tls: io.tls.Client(),
     current_max_msg_len: usize = msg_len_from,
     in_flight: std.ArrayList([]const u8),
 
@@ -87,12 +93,14 @@ const Handler = struct {
         self.in_flight.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    pub fn onConnect(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.debug("{*} connected", .{self});
         try self.send();
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
+    pub fn onRecv(ptr: *anyopaque, bytes: []const u8) !usize {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         var n: usize = 0; // number of bytes consumed
         while (self.in_flight.items.len > 0) {
             // Expect echoed message equal to  the first one sent
@@ -126,17 +134,19 @@ const Handler = struct {
         }
     }
 
-    pub fn onSend(_: *Self, _: []const u8) void {
+    pub fn onSend(_: *anyopaque, _: []const u8) void {
         // no free, using fixed buffer in send
         // self.allocator.free(buf);
     }
 
-    pub fn onClose(self: *Self) void {
+    pub fn onClose(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.debug("{*} closed", .{self});
         // posix.raise(posix.SIG.USR1) catch {};
     }
 
-    pub fn onError(self: *Self, err: anyerror) void {
+    pub fn onError(ptr: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.err("{*} {}", .{ self, err });
     }
 };

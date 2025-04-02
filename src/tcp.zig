@@ -45,7 +45,7 @@ pub const Conn = struct {
     /// Error returned in onRecv/onConnect callbacks will close connection.
     pub const VTable = struct {
         /// data is received
-        onRecv: *const fn (*anyopaque, []const u8) anyerror!void,
+        onRecv: *const fn (*anyopaque, []u8) anyerror!void,
         /// send is done, buffers can be released now
         onSend: *const fn (*anyopaque, []posix.iovec_const, ?anyerror) void,
         /// connection closed, cleanup done, safe to deinit
@@ -381,7 +381,7 @@ pub const BufferedConn = struct {
 
     pub const VTable = struct {
         /// data received, returns number of bytes consumed
-        onRecv: *const fn (*anyopaque, []const u8) anyerror!usize,
+        onRecv: *const fn (*anyopaque, []u8) anyerror!usize,
         /// send done, buffer released
         onSend: *const fn (*anyopaque, []const u8) void,
         /// cleanup done, safe to deinit
@@ -551,7 +551,7 @@ pub const BufferedConn = struct {
             };
     }
 
-    fn onRecv(context: *anyopaque, bytes: []const u8) anyerror!void {
+    fn onRecv(context: *anyopaque, bytes: []u8) anyerror!void {
         const self: *Self = @ptrCast(@alignCast(context));
         try self.buf_recv.onRecv(self.allocator, bytes, self.handler, self.vtable.onRecv);
     }
@@ -681,7 +681,7 @@ pub const BufferedRecv = struct {
         self.buf = &.{};
     }
 
-    fn append(self: *Self, allocator: mem.Allocator, bytes: []const u8) ![]const u8 {
+    fn append(self: *Self, allocator: mem.Allocator, bytes: []u8) ![]u8 {
         if (self.buf.len == 0) return bytes;
         const old_len = self.buf.len;
         self.buf = try allocator.realloc(self.buf, old_len + bytes.len);
@@ -701,9 +701,9 @@ pub const BufferedRecv = struct {
     pub fn onRecv(
         self: *Self,
         allocator: mem.Allocator,
-        bytes: []const u8,
+        bytes: []u8,
         context: *anyopaque,
-        cb: *const fn (*anyopaque, []const u8) anyerror!usize,
+        cb: *const fn (*anyopaque, []u8) anyerror!usize,
     ) !void {
         const buf = try self.append(allocator, bytes);
         const n = try cb(context, buf);
@@ -761,7 +761,7 @@ test "Conn" {
             if (self.tcp.reconnect_count == 10) self.tcp.close();
         }
 
-        fn onRecv(_: *anyopaque, bytes: []const u8) !void {
+        fn onRecv(_: *anyopaque, bytes: []u8) !void {
             std.debug.print("onRecv {s}\n", .{bytes});
         }
 

@@ -66,10 +66,16 @@ const Handler = struct {
     config: io.tls.config.Client,
     addr: net.Address,
 
-    tls: io.tls.Client(Self) = undefined,
+    tls: io.tls.Client() = undefined,
 
     pub fn connect(self: *Self) !void {
-        try self.tls.init(self.allocator, self.io_loop, self, self.config);
+        try self.tls.init(self.allocator, self.io_loop, self, .{
+            .onConnect = onConnect,
+            .onRecv = onRecv,
+            .onSend = onSend,
+            .onError = onError,
+            .onClose = onClose,
+        }, self.config);
         self.tls.connect(self.addr);
     }
 
@@ -77,24 +83,27 @@ const Handler = struct {
         self.tls.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    pub fn onConnect(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.tls.close();
     }
 
-    pub fn onRecv(_: *Self, _: []const u8) !usize {
+    pub fn onRecv(_: *anyopaque, _: []const u8) !usize {
         unreachable;
     }
 
-    pub fn onSend(_: *Self, _: []const u8) void {
+    pub fn onSend(_: *anyopaque, _: []const u8) void {
         unreachable;
     }
 
-    pub fn onClose(self: *Self) void {
+    pub fn onClose(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.tls.deinit();
         self.connect() catch unreachable;
     }
 
-    pub fn onError(self: *Self, err: anyerror) void {
+    pub fn onError(ptr: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.err("{*} {}", .{ self, err });
         unreachable;
     }

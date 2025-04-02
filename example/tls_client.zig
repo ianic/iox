@@ -45,7 +45,13 @@ pub fn main() !void {
         .host = host,
         .tls = undefined,
     };
-    try https.tls.init(allocator, &io_loop, &https, config);
+    try https.tls.init(allocator, &io_loop, &https, .{
+        .onConnect = Https.onConnect,
+        .onRecv = Https.onRecv,
+        .onSend = Https.onSend,
+        .onError = Https.onError,
+        .onClose = Https.onClose,
+    }, config);
     defer https.deinit();
     https.tls.connect(addr);
 
@@ -56,7 +62,7 @@ pub fn main() !void {
 
 const Https = struct {
     const Self = @This();
-    const Tls = io.tls.Client(Self);
+    const Tls = io.tls.Client();
 
     allocator: mem.Allocator,
     host: []const u8,
@@ -66,7 +72,8 @@ const Https = struct {
         self.tls.deinit();
     }
 
-    pub fn onConnect(self: *Self) !void {
+    pub fn onConnect(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         try self.get();
     }
 
@@ -76,13 +83,15 @@ const Https = struct {
         try self.tls.send(request);
     }
 
-    pub fn onSend(self: *Self, buf: []const u8) void {
+    pub fn onSend(ptr: *anyopaque, buf: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.allocator.free(buf);
     }
 
-    pub fn onRecv(self: *Self, bytes: []const u8) !usize {
-        //log.debug("recv {} bytes: {s}", .{ bytes.len, bytes }); //bytes[0..@min(128, bytes.len)] });
-        std.debug.print("{s}", .{bytes});
+    pub fn onRecv(ptr: *anyopaque, bytes: []const u8) !usize {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        log.debug("recv {}", .{bytes.len}); //bytes[0..@min(128, bytes.len)] });
+        //std.debug.print("{s}", .{bytes});
 
         if (std.ascii.endsWithIgnoreCase(
             std.mem.trimRight(u8, bytes, "\r\n"),
@@ -94,13 +103,13 @@ const Https = struct {
         return bytes.len;
     }
 
-    pub fn onClose(self: *Self) void {
+    pub fn onClose(_: *anyopaque) void {
         //log.debug("onClose", .{});
-        _ = self;
         posix.raise(posix.SIG.USR1) catch {};
     }
 
-    pub fn onError(self: *Self, err: anyerror) void {
+    pub fn onError(ptr: *anyopaque, err: anyerror) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         log.err("{*} {}", .{ self, err });
     }
 };

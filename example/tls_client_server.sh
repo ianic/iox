@@ -11,6 +11,7 @@ server_pid=$!
 
 # zig-out/bin/tls_connect_client &
 # connect_pid=$!
+# zig-out/bin/tls_connect_client
 
 zig-out/bin/tls_echo_client
 
