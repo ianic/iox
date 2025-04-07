@@ -24,7 +24,7 @@ pub fn main() !void {
     const port = 443;
 
     // tls config
-    var root_ca = try io.tls.config.CertBundle.fromSystem(allocator);
+    var root_ca = try io.tls.config.cert.fromSystem(allocator);
     defer root_ca.deinit(allocator);
     var diagnostic: io.tls.config.Client.Diagnostic = .{};
     const config: io.tls.config.Client = .{

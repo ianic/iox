@@ -22,7 +22,7 @@ pub fn main() !void {
     };
 
     // tls config
-    var root_ca = try io.tls.config.CertBundle.fromFile(
+    var root_ca = try io.tls.config.cert.fromFilePath(
         allocator,
         try std.fs.cwd().openDir("../tls.zig/example/cert", .{}),
         "minica.pem",

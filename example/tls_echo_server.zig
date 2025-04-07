@@ -30,7 +30,7 @@ pub fn main() !void {
     // Use certs from tls.zig project
     const dir = try std.fs.cwd().openDir("../tls.zig/example/cert", .{});
     // Load server certificate key pair
-    var auth = try io.tls.config.CertKeyPair.load(allocator, dir, "localhost_ec/cert.pem", "localhost_ec/key.pem");
+    var auth = try io.tls.config.CertKeyPair.fromFilePath(allocator, dir, "localhost_ec/cert.pem", "localhost_ec/key.pem");
     defer auth.deinit(allocator);
     const config: io.tls.config.Server = .{ .auth = &auth };
 

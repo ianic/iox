@@ -39,7 +39,7 @@ pub fn main() !void {
     try server.bind(allocator, &io_loop, addr);
     defer server.deinit();
 
-    std.debug.print("  msgs/s    cqe/s   loop/s ->GB/s <-GB/s no-buf\n", .{});
+    std.debug.print("  msgs/s    cqe/s   loop/s ->MB/s <-MB/s no-buf\n", .{});
     var ts = io_loop.now();
     while (true) {
         try io_loop.tick();
@@ -47,15 +47,15 @@ pub fn main() !void {
 
         if (elapsed > 10 * std.time.ns_per_s) {
             const sec = @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_s;
-            std.debug.print("{d:8.1} {d:8.1} {d:8.1}  {d:5.3}  {d:5.3} {d:5.3}% {}/{} \n", .{
+            std.debug.print("{d:8.1} {d:8.1} {d:8.1}  {d:5.1}  {d:5.1} {d:5.3}% {}/{} \n", .{
                 pers(stat.msgs, sec),
                 pers(io_loop.metric.cqes.diff(), sec),
                 pers(io_loop.metric.loops.diff(), sec),
 
                 //gbs(stat.bytes, sec),
 
-                gbs(io_loop.metric.send_bytes.diff(), sec),
-                gbs(io_loop.metric.recv_bytes.diff(), sec),
+                mbs(io_loop.metric.send_bytes.diff(), sec),
+                mbs(io_loop.metric.recv_bytes.diff(), sec),
 
                 io_loop.metric.recv_buf_grp.noBufsPercent(),
                 io_loop.metric.recv_buf_grp.no_bufs.diff(),
@@ -71,10 +71,10 @@ pub fn pers(count: usize, sec: f64) f64 {
     return @as(f64, @floatFromInt(count)) / sec;
 }
 pub fn mbs(bytes: usize, sec: f64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / 1024 / 1024 / sec;
+    return @as(f64, @floatFromInt(bytes)) / 1000 / 1000 / sec;
 }
 pub fn gbs(bytes: usize, sec: f64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / 1024 / 1024 / 1024 / sec;
+    return @as(f64, @floatFromInt(bytes)) / 1000 / 1000 / 1000 / sec;
 }
 
 var stat = struct {
