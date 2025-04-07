@@ -273,6 +273,10 @@ pub const Op = struct {
             addr: posix.sockaddr align(4) = undefined,
             addr_size: posix.socklen_t = @sizeOf(posix.sockaddr),
         },
+        bind: struct {
+            socket: socket_t,
+            addr: *net.Address,
+        },
         connect: SocketArgs,
         close: struct {
             socket: socket_t,
@@ -295,7 +299,7 @@ pub const Op = struct {
     };
 
     const SocketArgs = struct {
-        addr: *std.net.Address,
+        addr: *net.Address,
         socket_type: u32 = posix.SOCK.STREAM | posix.SOCK.CLOEXEC,
         protocol: u32 = 0,
         domain: u32 = 0,
@@ -339,6 +343,7 @@ pub const Op = struct {
 
     const Kind = enum {
         accept,
+        bind,
         connect,
         close,
         recv,
@@ -393,6 +398,7 @@ pub const Op = struct {
                 .timer => _ = try loop.ring.timeout_remove(@intFromPtr(op), @intFromPtr(op_to_cancel), 0),
                 else => _ = try loop.ring.cancel(@intFromPtr(op), @intFromPtr(op_to_cancel), 0),
             },
+            .bind => |*arg| _ = try loop.ring.bind(@intFromPtr(op), arg.socket, &arg.addr.any, arg.addr.getOsSockLen(), 0),
         }
         loop.metric.submit(op.args);
     }
@@ -432,6 +438,31 @@ pub const Op = struct {
             .context = @intFromPtr(context),
             .callback = wrapper.complete,
             .args = .{ .accept = .{ .socket = socket } },
+        };
+    }
+
+    pub fn bind(
+        socket: socket_t,
+        addr: *net.Address,
+        context: anytype,
+        comptime success: fn (@TypeOf(context)) Error!void,
+        comptime fail: fn (@TypeOf(context), anyerror) Error!void,
+    ) Op {
+        const Context = @TypeOf(context);
+        const wrapper = struct {
+            fn complete(op: *Op, _: *Loop, cqe: linux.io_uring_cqe) Error!void {
+                const ctx: Context = @ptrFromInt(op.context);
+                switch (cqe.err()) {
+                    .SUCCESS => try success(ctx),
+                    .CONNABORTED, .INTR => {}, // continue
+                    else => |errno| return try fail(ctx, errFromErrno(errno)),
+                }
+            }
+        };
+        return .{
+            .context = @intFromPtr(context),
+            .callback = wrapper.complete,
+            .args = .{ .bind = .{ .socket = socket, .addr = addr } },
         };
     }
 
@@ -662,6 +693,32 @@ pub const Op = struct {
                     else => |errno| {
                         fail(ctx, errFromErrno(errno));
                     },
+                }
+            }
+        };
+        return .{
+            .context = @intFromPtr(context),
+            .callback = wrapper.complete,
+            .args = .{ .socket = args },
+        };
+    }
+
+    pub fn createSocket(
+        args: SocketArgs,
+        context: anytype,
+        comptime success: fn (@TypeOf(context), socket_t) Error!void,
+        comptime fail: fn (@TypeOf(context), anyerror) Error!void,
+    ) Op {
+        const Context = @TypeOf(context);
+        const wrapper = struct {
+            fn complete(op: *Op, _: *Loop, cqe: linux.io_uring_cqe) Error!void {
+                const ctx: Context = @ptrFromInt(op.context);
+                switch (cqe.err()) {
+                    .SUCCESS => {
+                        const socket: socket_t = @intCast(cqe.res);
+                        try success(ctx, socket);
+                    },
+                    else => |errno| try fail(ctx, errFromErrno(errno)),
                 }
             }
         };
@@ -1019,7 +1076,7 @@ const Metric = struct {
             .recv => self.recv.submit(),
             .send, .sendv => self.sendv.submit(),
             .timer => self.timer.submit(),
-            .cancel, .socket, .shutdown => {},
+            .bind, .cancel, .socket, .shutdown => {},
         }
     }
 
@@ -1032,7 +1089,7 @@ const Metric = struct {
             .recv => self.recv.complete(),
             .send, .sendv => self.sendv.complete(),
             .timer => self.timer.complete(),
-            .cancel, .socket, .shutdown => {},
+            .bind, .cancel, .socket, .shutdown => {},
         }
     }
 
@@ -1045,7 +1102,7 @@ const Metric = struct {
             .recv => self.recv.restart(),
             .send, .sendv => self.sendv.restart(),
             .timer => self.timer.restart(),
-            .cancel, .socket, .shutdown => {},
+            .bind, .cancel, .socket, .shutdown => {},
         }
     }
 };
