@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const testing = std.testing;
 
 // Generated from std/os/linux/errno/generic.zig
 // https://github.com/ziglang/zig/blob/master/lib/std/os/linux/errno/generic.zig
@@ -314,8 +315,6 @@ pub fn toError(errno: posix.E) Error {
 pub inline fn name(errno: posix.E) []const u8 {
     return @errorName(toError(errno));
 }
-
-const testing = std.testing;
 
 test "errnoError" {
     try testing.expect(Error.OperationNotPermitted == toError(.PERM));
