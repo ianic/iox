@@ -218,7 +218,7 @@ pub const Conn = struct {
     }
 
     /// Failed connect callback
-    fn onConnectFail(self: *Self, err: anyerror) void {
+    fn onConnectFail(self: *Self, err: anyerror) io.Error!void {
         if (self.state == .closing) return self.closeOrReconnect();
         assert(self.state == .connecting);
         if (self.vtable.onDisconnect) |cb| cb(self.handler, err);

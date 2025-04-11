@@ -283,6 +283,10 @@ pub const Op = struct {
             err: ?anyerror,
         },
         recv: socket_t,
+        recvmsg: struct {
+            socket: socket_t,
+            msghdr: *posix.msghdr,
+        },
         sendv: struct {
             socket: socket_t,
             msghdr: *posix.msghdr_const,
@@ -347,6 +351,7 @@ pub const Op = struct {
         connect,
         close,
         recv,
+        recvmsg,
         sendv,
         send,
         timer,
@@ -380,6 +385,7 @@ pub const Op = struct {
             },
             .close => |*arg| _ = try loop.ring.close(@intFromPtr(op), arg.socket),
             .recv => |socket| _ = try loop.recv_buf_grp.recv_multishot(@intFromPtr(op), socket, 0),
+            .recvmsg => |*arg| _ = try loop.ring.recvmsg(@intFromPtr(op), arg.socket, arg.msghdr, linux.MSG.TRUNC),
             .sendv => |*arg| _ = if (arg.zero_copy)
                 try loop.ring.sendmsg_zc(@intFromPtr(op), arg.socket, arg.msghdr, linux.MSG.WAITALL | linux.MSG.NOSIGNAL)
             else
@@ -481,7 +487,7 @@ pub const Op = struct {
                         const n: usize = @intCast(cqe.res);
                         if (n == 0)
                             return try fail(ctx, error.EndOfFile);
-
+                        //std.debug.print("cqe: {} buffer_id: {}, flags: {b}\n", .{ cqe, cqe.buffer_id() catch unreachable, cqe.flags });
                         const bytes = loop.recv_buf_grp.get(cqe) catch unreachable;
                         try success(ctx, bytes);
                         loop.recv_buf_grp.put(cqe) catch unreachable;
@@ -676,7 +682,7 @@ pub const Op = struct {
         args: SocketArgs,
         context: anytype,
         comptime success: fn (@TypeOf(context), socket_t) Error!void,
-        comptime fail: fn (@TypeOf(context), anyerror) void,
+        comptime fail: fn (@TypeOf(context), anyerror) Error!void,
     ) Op {
         const Context = @TypeOf(context);
         const wrapper = struct {
@@ -690,9 +696,7 @@ pub const Op = struct {
                         op.* = Op.connectSocket(a, ctx, success, fail);
                         loop.submit(op);
                     },
-                    else => |errno| {
-                        fail(ctx, errFromErrno(errno));
-                    },
+                    else => |errno| try fail(ctx, errFromErrno(errno)),
                 }
             }
         };
@@ -733,7 +737,7 @@ pub const Op = struct {
         args: SocketArgs,
         context: anytype,
         comptime success: fn (@TypeOf(context), socket_t) Error!void,
-        comptime fail: fn (@TypeOf(context), anyerror) void,
+        comptime fail: fn (@TypeOf(context), anyerror) Error!void,
     ) Op {
         const Context = @TypeOf(context);
         const wrapper = struct {
@@ -786,14 +790,14 @@ pub const Op = struct {
         socket: socket_t,
         err: anyerror,
         context: anytype,
-        comptime done: fn (@TypeOf(context), anyerror) void,
+        comptime done: fn (@TypeOf(context), anyerror) Error!void,
     ) Op {
         const Context = @TypeOf(context);
         const wrapper = struct {
             fn complete(op: *Op, _: *Loop, cqe: linux.io_uring_cqe) Error!void {
                 _ = cqe;
                 const ctx: Context = @ptrFromInt(op.context);
-                done(ctx, op.args.close.err.?);
+                try done(ctx, op.args.close.err.?);
             }
         };
         return .{
@@ -874,6 +878,71 @@ pub const Op = struct {
         };
     }
 };
+
+pub const RecvmsgOp = struct {
+    const Self = @This();
+
+    op: Op = .{},
+    msghdr: posix.msghdr = mem.zeroes(posix.msghdr),
+    iov: [1]posix.iovec = undefined,
+    /// Populated with sender address after completion
+    addr: net.Address = mem.zeroes(net.Address),
+
+    pub fn init(
+        self: *Self,
+        socket: socket_t,
+        addr_len: posix.socklen_t,
+        buf: []u8,
+        context: anytype,
+        comptime success: fn (@TypeOf(context), []u8) Error!void,
+        comptime fail: fn (@TypeOf(context), anyerror) Error!void,
+    ) void {
+        self.msghdr.name = &self.addr.any;
+        self.msghdr.namelen = addr_len;
+        self.iov[0] = .{ .base = buf.ptr, .len = buf.len };
+        self.msghdr.iov = &self.iov;
+        self.msghdr.iovlen = 1;
+
+        const Context = @TypeOf(context);
+        const wrapper = struct {
+            fn complete(op: *Op, loop: *Loop, cqe: linux.io_uring_cqe) Error!void {
+                const ctx: Context = @ptrFromInt(op.context);
+                switch (cqe.err()) {
+                    .SUCCESS => {
+                        const n: usize = @intCast(cqe.res);
+                        if (n == 0)
+                            return try fail(ctx, error.EndOfFile);
+
+                        const msghdr = op.args.recvmsg.msghdr;
+                        if (msghdr.flags & std.os.linux.MSG.TRUNC == std.os.linux.MSG.TRUNC)
+                            return try fail(ctx, error.MessageTruncated);
+
+                        const bytes = bufFromVec(msghdr.iov[0])[0..n];
+                        try success(ctx, bytes);
+                    },
+                    .INTR => loop.restart(op),
+                    else => |errno| try fail(ctx, errFromErrno(errno)),
+                }
+            }
+        };
+        self.op = .{
+            .context = @intFromPtr(context),
+            .callback = wrapper.complete,
+            .args = .{ .recvmsg = .{ .socket = socket, .msghdr = &self.msghdr } },
+        };
+    }
+
+    pub fn submit(self: *Self, loop: *Loop) void {
+        loop.submit(&self.op);
+    }
+};
+
+fn bufFromVec(vec: posix.iovec) []u8 {
+    var buf: []u8 = undefined;
+    buf.ptr = vec.base;
+    buf.len = vec.len;
+    return buf;
+}
 
 const testing = std.testing;
 
@@ -1073,7 +1142,7 @@ const Metric = struct {
             .accept => self.accept.submit(),
             .connect => self.connect.submit(),
             .close => self.close.submit(),
-            .recv => self.recv.submit(),
+            .recv, .recvmsg => self.recv.submit(),
             .send, .sendv => self.sendv.submit(),
             .timer => self.timer.submit(),
             .bind, .cancel, .socket, .shutdown => {},
@@ -1086,7 +1155,7 @@ const Metric = struct {
             .accept => self.accept.complete(),
             .connect => self.connect.complete(),
             .close => self.close.complete(),
-            .recv => self.recv.complete(),
+            .recv, .recvmsg => self.recv.complete(),
             .send, .sendv => self.sendv.complete(),
             .timer => self.timer.complete(),
             .bind, .cancel, .socket, .shutdown => {},
@@ -1099,7 +1168,7 @@ const Metric = struct {
             .accept => self.accept.restart(),
             .connect => self.connect.restart(),
             .close => self.close.restart(),
-            .recv => self.recv.restart(),
+            .recv, .recvmsg => self.recv.restart(),
             .send, .sendv => self.sendv.restart(),
             .timer => self.timer.restart(),
             .bind, .cancel, .socket, .shutdown => {},

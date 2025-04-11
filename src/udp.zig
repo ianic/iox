@@ -3,6 +3,8 @@ const net = std.net;
 const mem = std.mem;
 const assert = std.debug.assert;
 const posix = std.posix;
+const testing = std.testing;
+
 const io = @import("io.zig");
 
 const log = std.log.scoped(.io_tcp);
@@ -13,7 +15,7 @@ pub const Sender = struct {
     /// Handler callbacks
     pub const VTable = struct {
         /// send is done, buffers can be released now
-        onSend: ?*const fn (*anyopaque, []posix.iovec_const, ?anyerror) void = null,
+        onSend: ?*const fn (*anyopaque, []const u8, ?anyerror) void = null,
         /// connection closed, cleanup done, safe to deinit
         onClose: ?*const fn (*anyopaque) void = null,
     };
@@ -25,16 +27,8 @@ pub const Sender = struct {
     socket: posix.socket_t = 0,
     state: State = .closed,
     op: io.Op = .{},
-    iov: []posix.iovec_const = &.{},
-    msghdr: posix.msghdr_const = .{
-        .iov = undefined,
-        .iovlen = 0,
-        .name = null,
-        .namelen = 0,
-        .control = null,
-        .controllen = 0,
-        .flags = 0,
-    },
+    addr: net.Address,
+    buf: []const u8 = &.{},
 
     const State = enum {
         closed,
@@ -43,9 +37,10 @@ pub const Sender = struct {
         closing,
     };
 
-    pub fn init(io_loop: *io.Loop, handler: *anyopaque, vtable: VTable) Self {
+    pub fn init(io_loop: *io.Loop, addr: net.Address, handler: *anyopaque, vtable: VTable) Self {
         return .{
             .io_loop = io_loop,
+            .addr = addr,
             .handler = handler,
             .vtable = vtable,
             .state = .closed,
@@ -57,26 +52,19 @@ pub const Sender = struct {
         return !self.op.active() and self.state != .closing;
     }
 
-    pub fn send(self: *Self, iov: []posix.iovec_const, addr: *net.Address) void {
-        if (iov.len == 0) return;
+    pub fn send(self: *Self, buf: []const u8) void {
         assert(self.ready());
-
-        self.iov = iov;
-        self.msghdr.iov = undefined;
-        self.msghdr.iovlen = 0;
-        self.msghdr.name = &addr.any;
-        self.msghdr.namelen = addr.getOsSockLen();
-
-        if (self.socket == 0) return self.createSocke(addr);
+        self.buf = buf;
+        if (self.socket == 0) return self.createSocket();
         self.sendPending();
     }
 
-    fn createSocke(self: *Self, addr: *net.Address) void {
+    fn createSocket(self: *Self) void {
         self.state = .connecting;
-        self.op = io.Op.createSocket(
+        self.op = io.Op.connect(
             .{
                 .socket_type = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC,
-                .addr = addr,
+                .addr = &self.addr,
             },
             self,
             onSocket,
@@ -86,18 +74,18 @@ pub const Sender = struct {
     }
 
     fn sendPending(self: *Self) void {
-        assert(self.msghdr.iovlen == 0);
-        if (self.iov.len == 0) return;
-        self.msghdr.iov = self.iov.ptr;
-        self.msghdr.iovlen = @intCast(self.iov.len);
-        self.op = io.Op.sendv(self.socket, &self.msghdr, self, onSend, onError);
+        if (self.buf.len == 0) return;
+        self.op = io.Op.send(self.socket, self.buf, self, onSend, onError);
         self.io_loop.submit(&self.op);
     }
 
     fn onSocket(self: *Self, socket: posix.socket_t) io.Error!void {
         assert(self.socket == 0);
         self.socket = socket;
-        if (self.state == .closing) return self.close();
+        if (self.state == .closing) {
+            if (self.buf.len > 0) return self.sendCompleted(error.OperationCanceled);
+            return self.close();
+        }
         self.state = .open;
         self.sendPending();
     }
@@ -105,10 +93,8 @@ pub const Sender = struct {
     /// Send operation is completed, release pending resources and notify
     /// handler that we are done with sending their buffers.
     fn sendCompleted(self: *Self, err: ?anyerror) void {
-        self.msghdr.iov = undefined;
-        self.msghdr.iovlen = 0;
-        if (self.vtable.onSend) |cb| cb(self.handler, self.iov, err);
-        self.iov = &.{};
+        if (self.vtable.onSend) |cb| cb(self.handler, self.buf, err);
+        self.buf = &.{};
         if (self.state == .closing) return self.close();
     }
 
@@ -150,18 +136,20 @@ pub const Receiver = struct {
         /// send is done, buffers can be released now
         onRecv: *const fn (*anyopaque, []u8) anyerror!void,
         /// connection closed, cleanup done, safe to deinit
-        onClose: ?*const fn (*anyopaque) void,
+        onClose: ?*const fn (*anyopaque) void = null,
         /// unexpected error
-        onError: ?*const fn (*anyopaque, anyerror) void,
+        onError: ?*const fn (*anyopaque, anyerror) void = null,
     };
 
     handler: *anyopaque,
     vtable: VTable,
     io_loop: *io.Loop,
     op: io.Op = .{},
-    close_op: io.Op = .{},
+    recv_op: io.RecvmsgOp = .{},
     socket: posix.socket_t = 0,
     state: State = .closed,
+    addr: net.Address = undefined,
+    buffer: [1024 * 64]u8 = undefined,
 
     const State = enum {
         closed,
@@ -178,12 +166,13 @@ pub const Receiver = struct {
         };
     }
 
-    pub fn bind(self: *Self, addr: *net.Address) void {
+    pub fn bind(self: *Self, addr: net.Address) void {
+        self.addr = addr;
         self.state = .binding;
         self.op = io.Op.createSocket(
             .{
                 .socket_type = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC,
-                .addr = addr,
+                .addr = &self.addr,
             },
             self,
             onSocket,
@@ -194,23 +183,29 @@ pub const Receiver = struct {
 
     fn onSocket(self: *Self, socket: posix.socket_t) io.Error!void {
         self.socket = socket;
-        const addr = self.op.args.socket.addr;
-        self.op = io.Op.bind(socket, addr, self, onBind, onError);
+        self.op = io.Op.bind(socket, &self.addr, self, onBind, onError);
         self.io_loop.submit(&self.op);
     }
 
     fn onBind(self: *Self) io.Error!void {
         self.state = .open;
-        self.op = io.Op.recv(self.socket, self, onRecv, onError);
-        self.io_loop.submit(&self.op);
+        self.recv_op.init(
+            self.socket,
+            self.addr.getOsSockLen(),
+            &self.buffer,
+            self,
+            onRecv,
+            onError,
+        );
+        self.recv_op.submit(self.io_loop);
     }
 
-    fn onRecv(self: *Self, bytes: []u8) io.Error!void {
-        self.vtable.onRecv(self.handler, bytes) catch |err| {
+    fn onRecv(self: *Self, buf: []u8) io.Error!void {
+        // NOTE: sender address is in self.recv_op.addr
+        self.vtable.onRecv(self.handler, buf) catch |err| {
             return self.onError(err);
         };
-        if (!self.op.hasMore() and !self.op.canceled() and self.state == .open)
-            self.io_loop.submit(&self.op);
+        self.recv_op.submit(self.io_loop);
     }
 
     fn onError(self: *Self, err: anyerror) io.Error!void {
@@ -228,18 +223,19 @@ pub const Receiver = struct {
         if (self.state == .closed) return;
         if (self.state != .closing) self.state = .closing;
 
-        if (self.op.active() and !self.op.canceled() and !self.close_op.active()) {
-            self.close_op = io.Op.cancel(&self.op, self, onCancel);
-            return self.io_loop.submit(&self.close_op);
+        const recv_op = &self.recv_op.op;
+        if (recv_op.active() and !recv_op.canceled() and !self.op.active()) {
+            self.op = io.Op.cancel(recv_op, self, onCancel);
+            return self.io_loop.submit(&self.op);
         }
 
-        if (self.socket != 0 and !self.close_op.active()) {
-            self.close_op = io.Op.closeSocket(self.socket, self, onCancel);
+        if (self.socket != 0 and !self.op.active()) {
+            self.op = io.Op.closeSocket(self.socket, self, onCancel);
             self.socket = 0;
-            return self.io_loop.submit(&self.close_op);
+            return self.io_loop.submit(&self.op);
         }
 
-        if (self.close_op.active() or
+        if (recv_op.active() or
             self.op.active())
             return;
 
@@ -248,26 +244,18 @@ pub const Receiver = struct {
     }
 };
 
-const testing = std.testing;
-pub const FixedSendVec = @import("tcp.zig").FixedSendVec;
-
-test "Sender" {
-    //if (true) return error.SkipZigTest;
-    // To run this test first start listening on udp port:
-    // $ nc -kluvw 0 localhost 9000
-
+test "udp send/receive" {
     const SendHandler = struct {
         const Self = @This();
         udp: Sender,
         send_count: usize = 0,
         closed: bool = false,
 
-        fn onSend(ptr: *anyopaque, iov: []posix.iovec_const, err: ?anyerror) void {
+        fn onSend(ptr: *anyopaque, iov: []const u8, err: ?anyerror) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             self.send_count += 1;
             if (err != null) unreachable;
             _ = iov;
-            //std.debug.print("onSend: iov.len: {} error: {any}\n", .{ iov.len, err });
         }
         fn onClose(ptr: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
@@ -278,14 +266,8 @@ test "Sender" {
 
     const allocator = testing.allocator;
     var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{ .entries = 16, .recv_buffers = 2, .recv_buffer_len = 64 * 1024 });
+    try io_loop.init(allocator, .{ .entries = 16, .recv_buffers = 0 });
     defer io_loop.deinit();
-
-    var addr = try net.Address.resolveIp("127.0.0.1", 9123);
-    send_handler.udp = .init(&io_loop, &send_handler, .{
-        .onClose = SendHandler.onClose,
-        .onSend = SendHandler.onSend,
-    });
 
     const RecvHandler = struct {
         const Self = @This();
@@ -322,30 +304,46 @@ test "Sender" {
         .onClose = RecvHandler.onClose,
         .onError = RecvHandler.onError,
     });
-    recv_handler.udp.bind(&addr);
+    var addr = try net.Address.resolveIp("127.0.0.1", 0);
+    recv_handler.udp.bind(addr);
 
     while (true) {
-        std.debug.print(".", .{});
+        //std.debug.print(".", .{});
         try io_loop.tick();
         if (recv_handler.udp.state == .open) break;
     }
 
-    var send_vec: FixedSendVec(4) = .{};
-    assert(send_vec.prep("iso medo u ducan\n"));
-    assert(send_vec.prep("nije reko dobar dan\n"));
-    assert(send_vec.prep("ajde medo van nisi reko dobar dan\n"));
-    assert(send_vec.prep("0123456789abcdf" ** 1024));
-    send_handler.udp.send(send_vec.get(), &addr);
+    // Read system assigned port into addr
+    var addr_len: posix.socklen_t = addr.getOsSockLen();
+    try posix.getsockname(recv_handler.udp.socket, &addr.any, &addr_len);
 
+    send_handler.udp = .init(&io_loop, addr, &send_handler, .{
+        .onClose = SendHandler.onClose,
+        .onSend = SendHandler.onSend,
+    });
+
+    const msg1 = "0123456789" ** 10;
+    send_handler.udp.send(msg1);
     while (true) {
-        std.debug.print(",", .{});
+        //std.debug.print(",", .{});
         try io_loop.tick();
         if (recv_handler.msgs.items.len > 0) break;
+    }
+
+    const msg2 = "abcdefghijk" ** 10;
+    send_handler.udp.send(msg2);
+    while (true) {
+        //std.debug.print(";", .{});
+        try io_loop.tick();
+        if (recv_handler.msgs.items.len > 1) break;
     }
 
     recv_handler.udp.close();
     send_handler.udp.close();
     try io_loop.drain();
+
+    try testing.expectEqualSlices(u8, msg1, recv_handler.msgs.items[0]);
+    try testing.expectEqualSlices(u8, msg2, recv_handler.msgs.items[1]);
 
     try testing.expect(send_handler.closed);
     try testing.expect(recv_handler.closed);

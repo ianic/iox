@@ -19,9 +19,7 @@ pub const tcp = struct {
     pub const Server = _tcp.Server;
 };
 
-pub const udp = struct {
-    pub const Sender = @import("udp.zig").Sender;
-};
+pub const udp = @import("udp.zig");
 
 pub const tls = struct {
     const _lib = @import("tls");
