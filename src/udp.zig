@@ -141,15 +141,16 @@ pub const Receiver = struct {
         onError: ?*const fn (*anyopaque, anyerror) void = null,
     };
 
+    io_loop: *io.Loop,
+    bind_addr: net.Address,
     handler: *anyopaque,
     vtable: VTable,
-    io_loop: *io.Loop,
+
     op: io.Op = .{},
     recv_op: io.RecvmsgOp = .{},
     socket: posix.socket_t = 0,
+    buffer: ?[]u8 = null,
     state: State = .closed,
-    addr: net.Address = undefined,
-    buffer: [1024 * 64]u8 = undefined,
 
     const State = enum {
         closed,
@@ -158,21 +159,44 @@ pub const Receiver = struct {
         closing,
     };
 
-    pub fn init(io_loop: *io.Loop, handler: *anyopaque, vtable: VTable) Self {
+    pub fn init(
+        io_loop: *io.Loop,
+        bind_addr: net.Address,
+        handler: *anyopaque,
+        vtable: VTable,
+    ) Self {
         return .{
+            .bind_addr = bind_addr,
             .io_loop = io_loop,
             .handler = handler,
             .vtable = vtable,
         };
     }
 
-    pub fn bind(self: *Self, addr: net.Address) void {
-        self.addr = addr;
+    pub fn recv(self: *Self, buffer: []u8) void {
+        assert(self.buffer == null);
+        self.buffer = buffer;
+
+        switch (self.state) {
+            .open => self.recvSubmit(),
+            .closed => self.bind(),
+            .binding => {},
+            .closing => {},
+        }
+    }
+
+    fn recvSubmit(self: *Self) void {
+        const buf = self.buffer.?;
+        self.recv_op.submit(self.io_loop, buf);
+    }
+
+    fn bind(self: *Self) void {
+        assert(self.socket == 0);
         self.state = .binding;
         self.op = io.Op.createSocket(
             .{
                 .socket_type = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC,
-                .addr = &self.addr,
+                .addr = &self.bind_addr,
             },
             self,
             onSocket,
@@ -183,32 +207,32 @@ pub const Receiver = struct {
 
     fn onSocket(self: *Self, socket: posix.socket_t) io.Error!void {
         self.socket = socket;
-        self.op = io.Op.bind(socket, &self.addr, self, onBind, onError);
+        self.op = io.Op.bind(socket, &self.bind_addr, self, onBind, onError);
         self.io_loop.submit(&self.op);
     }
 
     fn onBind(self: *Self) io.Error!void {
-        self.state = .open;
         self.recv_op.init(
             self.socket,
-            self.addr.getOsSockLen(),
-            &self.buffer,
+            self.bind_addr.getOsSockLen(),
             self,
             onRecv,
             onError,
         );
-        self.recv_op.submit(self.io_loop);
+        self.state = .open;
+        self.recvSubmit();
     }
 
     fn onRecv(self: *Self, buf: []u8) io.Error!void {
+        self.buffer = null;
         // NOTE: sender address is in self.recv_op.addr
         self.vtable.onRecv(self.handler, buf) catch |err| {
             return self.onError(err);
         };
-        self.recv_op.submit(self.io_loop);
     }
 
     fn onError(self: *Self, err: anyerror) io.Error!void {
+        self.buffer = null;
         if (err != error.OperationCanceled) {
             if (self.vtable.onError) |cb| cb(self.handler, err);
         }
@@ -251,34 +275,34 @@ test "udp send/receive" {
         send_count: usize = 0,
         closed: bool = false,
 
-        fn onSend(ptr: *anyopaque, iov: []const u8, err: ?anyerror) void {
+        fn onSend(ptr: *anyopaque, buf: []const u8, err: ?anyerror) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             self.send_count += 1;
             if (err != null) unreachable;
-            _ = iov;
+            _ = buf;
         }
         fn onClose(ptr: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            assert(!self.closed);
             self.closed = true;
         }
     };
-    var send_handler: SendHandler = .{ .udp = undefined };
-
-    const allocator = testing.allocator;
-    var io_loop: io.Loop = undefined;
-    try io_loop.init(allocator, .{ .entries = 16, .recv_buffers = 0 });
-    defer io_loop.deinit();
-
     const RecvHandler = struct {
         const Self = @This();
         udp: Receiver,
-        allocator: mem.Allocator,
-        msgs: std.ArrayList([]const u8),
+        buffer: [100 + 110]u8 = undefined,
+        buffer_pos: usize = 0,
+        recv_count: usize = 0,
         closed: bool = false,
 
         fn onRecv(ptr: *anyopaque, bytes: []u8) io.Error!void {
             const self: *Self = @ptrCast(@alignCast(ptr));
-            try self.msgs.append(try self.allocator.dupe(u8, bytes));
+            self.buffer_pos += bytes.len;
+            self.recv_count += 1;
+        }
+
+        pub fn recv(self: *Self) void {
+            self.udp.recv(self.buffer[self.buffer_pos..]);
         }
 
         fn onError(_: *anyopaque, err: anyerror) void {
@@ -287,63 +311,59 @@ test "udp send/receive" {
         }
         fn onClose(ptr: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            assert(!self.closed);
             self.closed = true;
         }
     };
-    var recv_handler: RecvHandler = .{
-        .allocator = allocator,
-        .msgs = std.ArrayList([]const u8).init(allocator),
-        .udp = undefined,
-    };
-    defer {
-        for (recv_handler.msgs.items) |buf| allocator.free(buf);
-        recv_handler.msgs.deinit();
-    }
-    recv_handler.udp = .init(&io_loop, &recv_handler, .{
+
+    const allocator = testing.allocator;
+    var io_loop: io.Loop = undefined;
+    try io_loop.init(allocator, .{ .entries = 16, .recv_buffers = 0 });
+    defer io_loop.deinit();
+
+    var recv_handler: RecvHandler = .{ .udp = undefined };
+    const addr = try net.Address.resolveIp("127.0.0.1", 9123);
+    recv_handler.udp = .init(&io_loop, addr, &recv_handler, .{
         .onRecv = RecvHandler.onRecv,
         .onClose = RecvHandler.onClose,
         .onError = RecvHandler.onError,
     });
-    var addr = try net.Address.resolveIp("127.0.0.1", 0);
-    recv_handler.udp.bind(addr);
 
-    while (true) {
-        //std.debug.print(".", .{});
-        try io_loop.tick();
-        if (recv_handler.udp.state == .open) break;
-    }
-
-    // Read system assigned port into addr
-    var addr_len: posix.socklen_t = addr.getOsSockLen();
-    try posix.getsockname(recv_handler.udp.socket, &addr.any, &addr_len);
-
+    var send_handler: SendHandler = .{ .udp = undefined };
     send_handler.udp = .init(&io_loop, addr, &send_handler, .{
         .onClose = SendHandler.onClose,
         .onSend = SendHandler.onSend,
     });
 
-    const msg1 = "0123456789" ** 10;
-    send_handler.udp.send(msg1);
-    while (true) {
-        //std.debug.print(",", .{});
-        try io_loop.tick();
-        if (recv_handler.msgs.items.len > 0) break;
+    {
+        const msg1 = "0123456789" ** 10;
+        send_handler.udp.send(msg1);
+        recv_handler.recv();
+
+        while (true) {
+            //std.debug.print(",", .{});
+            try io_loop.tick();
+            if (recv_handler.recv_count > 0) break;
+        }
+        try testing.expectEqualSlices(u8, msg1, recv_handler.buffer[0..recv_handler.buffer_pos]);
     }
 
-    const msg2 = "abcdefghijk" ** 10;
-    send_handler.udp.send(msg2);
-    while (true) {
-        //std.debug.print(";", .{});
-        try io_loop.tick();
-        if (recv_handler.msgs.items.len > 1) break;
+    {
+        const buffer_head = recv_handler.buffer_pos;
+        const msg2 = "abcdefghijk" ** 10;
+        send_handler.udp.send(msg2);
+        recv_handler.recv();
+        while (true) {
+            //std.debug.print(";", .{});
+            try io_loop.tick();
+            if (recv_handler.recv_count > 1) break;
+        }
+        try testing.expectEqualSlices(u8, msg2, recv_handler.buffer[buffer_head..recv_handler.buffer_pos]);
     }
 
     recv_handler.udp.close();
     send_handler.udp.close();
     try io_loop.drain();
-
-    try testing.expectEqualSlices(u8, msg1, recv_handler.msgs.items[0]);
-    try testing.expectEqualSlices(u8, msg2, recv_handler.msgs.items[1]);
 
     try testing.expect(send_handler.closed);
     try testing.expect(recv_handler.closed);

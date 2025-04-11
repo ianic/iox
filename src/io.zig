@@ -892,14 +892,12 @@ pub const RecvmsgOp = struct {
         self: *Self,
         socket: socket_t,
         addr_len: posix.socklen_t,
-        buf: []u8,
         context: anytype,
         comptime success: fn (@TypeOf(context), []u8) Error!void,
         comptime fail: fn (@TypeOf(context), anyerror) Error!void,
     ) void {
         self.msghdr.name = &self.addr.any;
         self.msghdr.namelen = addr_len;
-        self.iov[0] = .{ .base = buf.ptr, .len = buf.len };
         self.msghdr.iov = &self.iov;
         self.msghdr.iovlen = 1;
 
@@ -932,7 +930,8 @@ pub const RecvmsgOp = struct {
         };
     }
 
-    pub fn submit(self: *Self, loop: *Loop) void {
+    pub fn submit(self: *Self, loop: *Loop, buf: []u8) void {
+        self.iov[0] = .{ .base = buf.ptr, .len = buf.len };
         loop.submit(&self.op);
     }
 };
