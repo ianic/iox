@@ -140,10 +140,9 @@ pub const Receiver = struct {
         onRecv: *const fn (*anyopaque, anyerror!Msg) anyerror!void,
         /// connection closed, cleanup done, safe to deinit
         onClose: ?*const fn (*anyopaque) void = null,
-        /// unexpected error
-        onError: ?*const fn (*anyopaque, anyerror) void = null,
     };
 
+    allocator: ?mem.Allocator,
     io_loop: *io.Loop,
     bind_addr: net.Address,
     handler: *anyopaque,
@@ -162,10 +161,18 @@ pub const Receiver = struct {
         closing,
     };
 
-    // pub const Result = struct {
-    //     bytes: []u8,
-    //     sender: *net.Address,
-    // };
+    pub fn create(
+        allocator: mem.Allocator,
+        io_loop: *io.Loop,
+        bind_addr: net.Address,
+        handler: *anyopaque,
+        vtable: VTable,
+    ) *Self {
+        const self = allocator.create(Self);
+        self.* = init(io_loop, bind_addr, handler, vtable);
+        self.allocator = allocator;
+        return self;
+    }
 
     pub fn init(
         io_loop: *io.Loop,
@@ -174,11 +181,16 @@ pub const Receiver = struct {
         vtable: VTable,
     ) Self {
         return .{
+            .allocator = null,
             .bind_addr = bind_addr,
             .io_loop = io_loop,
             .handler = handler,
             .vtable = vtable,
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.close();
     }
 
     pub fn recv(self: *Self, buffer: []u8) void {
@@ -188,8 +200,8 @@ pub const Receiver = struct {
         switch (self.state) {
             .open => self.recvSubmit(),
             .closed => self.bind(),
-            .binding => {},
-            .closing => {},
+            .binding => unreachable,
+            .closing => self.onError(error.Closing) catch {},
         }
     }
 
@@ -239,9 +251,10 @@ pub const Receiver = struct {
 
     fn onError(self: *Self, err: anyerror) io.Error!void {
         self.buffer = null;
-        if (err != error.OperationCanceled) {
-            self.vtable.onRecv(self.handler, err) catch {};
-        }
+        //if (err != error.OperationCanceled) {
+        self.vtable.onRecv(self.handler, err) catch {};
+        //}
+        // TODO tko zove close
         self.close();
     }
 
@@ -253,24 +266,27 @@ pub const Receiver = struct {
         if (self.state == .closed) return;
         if (self.state != .closing) self.state = .closing;
 
+        if (self.op.active()) return;
+
         const recv_op = &self.recv_op.op;
-        if (recv_op.active() and !recv_op.canceled() and !self.op.active()) {
+        if (recv_op.active() and !recv_op.canceled()) {
             self.op = io.Op.cancel(recv_op, self, onCancel);
             return self.io_loop.submit(&self.op);
         }
 
-        if (self.socket != 0 and !self.op.active()) {
+        if (self.socket != 0) {
             self.op = io.Op.closeSocket(self.socket, self, onCancel);
             self.socket = 0;
             return self.io_loop.submit(&self.op);
         }
 
-        if (recv_op.active() or
-            self.op.active())
-            return;
+        if (recv_op.active()) return;
 
         self.state = .closed;
-        if (self.vtable.onClose) |cb| cb(self.handler);
+        if (self.allocator) |allocator|
+            return allocator.destroy(self);
+        if (self.vtable.onClose) |cb|
+            cb(self.handler);
     }
 };
 
@@ -305,7 +321,10 @@ test "udp send/receive" {
         fn onRecv(ptr: *anyopaque, err_msg: anyerror!Receiver.Msg) io.Error!void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             self.recv_count += 1;
-            const msg = err_msg catch unreachable;
+            const msg = err_msg catch |err| {
+                self.err = err;
+                return;
+            };
             self.buffer_pos += msg.bytes.len;
             if (msg.flags.trunc) {
                 self.err = error.MessageTruncated;
@@ -316,10 +335,6 @@ test "udp send/receive" {
             self.udp.recv(self.buffer[self.buffer_pos..]);
         }
 
-        fn onError(_: *anyopaque, err: anyerror) void {
-            std.debug.print("onError: {}\n", .{err});
-            unreachable;
-        }
         fn onClose(ptr: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             assert(!self.closed);
@@ -337,7 +352,6 @@ test "udp send/receive" {
     recv_handler.udp = .init(&io_loop, addr, &recv_handler, .{
         .onRecv = RecvHandler.onRecv,
         .onClose = RecvHandler.onClose,
-        .onError = RecvHandler.onError,
     });
 
     var send_handler: SendHandler = .{ .udp = undefined };
@@ -385,10 +399,12 @@ test "udp send/receive" {
         try testing.expectEqualSlices(u8, msg3[0..1], recv_handler.buffer[buffer_head..]);
     }
 
+    recv_handler.recv();
     recv_handler.udp.close();
     send_handler.udp.close();
     try io_loop.drain();
 
+    try testing.expectEqual(error.OperationCanceled, recv_handler.err.?);
     try testing.expect(send_handler.closed);
     try testing.expect(recv_handler.closed);
 }
