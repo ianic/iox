@@ -882,6 +882,22 @@ pub const Op = struct {
 pub const RecvmsgOp = struct {
     const Self = @This();
 
+    pub const Msg = struct {
+        /// Received message bytes.
+        bytes: []const u8,
+        /// Total message len.
+        /// NOTE: Len of bytes can be less then Msg.len if message is truncated.
+        len: usize,
+        /// Address of the sender
+        sender: net.Address,
+        flags: packed struct {
+            _0: u5 = 0,
+            /// Message truncated!
+            trunc: bool,
+            _: u26 = 0,
+        },
+    };
+
     op: Op = .{},
     msghdr: posix.msghdr = mem.zeroes(posix.msghdr),
     iov: [1]posix.iovec = undefined,
@@ -893,8 +909,7 @@ pub const RecvmsgOp = struct {
         socket: socket_t,
         addr_len: posix.socklen_t,
         context: anytype,
-        comptime success: fn (@TypeOf(context), []u8) Error!void,
-        comptime fail: fn (@TypeOf(context), anyerror) Error!void,
+        comptime callback: fn (@TypeOf(context), anyerror!Msg) Error!void,
     ) void {
         self.msghdr.name = &self.addr.any;
         self.msghdr.namelen = addr_len;
@@ -908,18 +923,20 @@ pub const RecvmsgOp = struct {
                 switch (cqe.err()) {
                     .SUCCESS => {
                         const n: usize = @intCast(cqe.res);
-                        if (n == 0)
-                            return try fail(ctx, error.EndOfFile);
-
+                        // const msg_trunc: bool = (msghdr.flags & std.os.linux.MSG.TRUNC == std.os.linux.MSG.TRUNC);
                         const msghdr = op.args.recvmsg.msghdr;
-                        if (msghdr.flags & std.os.linux.MSG.TRUNC == std.os.linux.MSG.TRUNC)
-                            return try fail(ctx, error.MessageTruncated);
-
-                        const bytes = bufFromVec(msghdr.iov[0])[0..n];
-                        try success(ctx, bytes);
+                        const buf = bufFromVec(msghdr.iov[0]);
+                        const bytes = buf[0..@min(buf.len, n)];
+                        const msg: Msg = .{
+                            .bytes = bytes,
+                            .len = n,
+                            .sender = net.Address.initPosix(@alignCast(msghdr.name.?)),
+                            .flags = @bitCast(msghdr.flags),
+                        };
+                        try callback(ctx, msg);
                     },
                     .INTR => loop.restart(op),
-                    else => |errno| try fail(ctx, errFromErrno(errno)),
+                    else => |errno| try callback(ctx, errFromErrno(errno)),
                 }
             }
         };

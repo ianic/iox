@@ -28,7 +28,7 @@ pub const Sender = struct {
     state: State = .closed,
     op: io.Op = .{},
     addr: net.Address,
-    buf: []const u8 = &.{},
+    buf: ?[]const u8 = null,
 
     const State = enum {
         closed,
@@ -74,16 +74,17 @@ pub const Sender = struct {
     }
 
     fn sendPending(self: *Self) void {
-        if (self.buf.len == 0) return;
-        self.op = io.Op.send(self.socket, self.buf, self, onSend, onError);
-        self.io_loop.submit(&self.op);
+        if (self.buf) |buf| {
+            self.op = io.Op.send(self.socket, buf, self, onSend, onError);
+            self.io_loop.submit(&self.op);
+        }
     }
 
     fn onSocket(self: *Self, socket: posix.socket_t) io.Error!void {
         assert(self.socket == 0);
         self.socket = socket;
         if (self.state == .closing) {
-            if (self.buf.len > 0) return self.sendCompleted(error.OperationCanceled);
+            if (self.buf != null) return self.sendCompleted(error.OperationCanceled);
             return self.close();
         }
         self.state = .open;
@@ -93,8 +94,8 @@ pub const Sender = struct {
     /// Send operation is completed, release pending resources and notify
     /// handler that we are done with sending their buffers.
     fn sendCompleted(self: *Self, err: ?anyerror) void {
-        if (self.vtable.onSend) |cb| cb(self.handler, self.buf, err);
-        self.buf = &.{};
+        if (self.vtable.onSend) |cb| cb(self.handler, self.buf.?, err);
+        self.buf = null;
         if (self.state == .closing) return self.close();
     }
 
@@ -131,10 +132,12 @@ pub const Sender = struct {
 pub const Receiver = struct {
     const Self = @This();
 
+    pub const Msg = io.RecvmsgOp.Msg;
+
     /// Handler callbacks
     pub const VTable = struct {
         /// send is done, buffers can be released now
-        onRecv: *const fn (*anyopaque, []u8) anyerror!void,
+        onRecv: *const fn (*anyopaque, anyerror!Msg) anyerror!void,
         /// connection closed, cleanup done, safe to deinit
         onClose: ?*const fn (*anyopaque) void = null,
         /// unexpected error
@@ -158,6 +161,11 @@ pub const Receiver = struct {
         open,
         closing,
     };
+
+    // pub const Result = struct {
+    //     bytes: []u8,
+    //     sender: *net.Address,
+    // };
 
     pub fn init(
         io_loop: *io.Loop,
@@ -217,24 +225,22 @@ pub const Receiver = struct {
             self.bind_addr.getOsSockLen(),
             self,
             onRecv,
-            onError,
         );
         self.state = .open;
         self.recvSubmit();
     }
 
-    fn onRecv(self: *Self, buf: []u8) io.Error!void {
+    fn onRecv(self: *Self, err_msg: anyerror!Msg) io.Error!void {
         self.buffer = null;
-        // NOTE: sender address is in self.recv_op.addr
-        self.vtable.onRecv(self.handler, buf) catch |err| {
-            return self.onError(err);
+        self.vtable.onRecv(self.handler, err_msg) catch {
+            return self.close();
         };
     }
 
     fn onError(self: *Self, err: anyerror) io.Error!void {
         self.buffer = null;
         if (err != error.OperationCanceled) {
-            if (self.vtable.onError) |cb| cb(self.handler, err);
+            self.vtable.onRecv(self.handler, err) catch {};
         }
         self.close();
     }
@@ -290,15 +296,20 @@ test "udp send/receive" {
     const RecvHandler = struct {
         const Self = @This();
         udp: Receiver,
-        buffer: [100 + 110]u8 = undefined,
+        buffer: [100 + 110 + 1]u8 = undefined,
         buffer_pos: usize = 0,
         recv_count: usize = 0,
         closed: bool = false,
+        err: ?anyerror = null,
 
-        fn onRecv(ptr: *anyopaque, bytes: []u8) io.Error!void {
+        fn onRecv(ptr: *anyopaque, err_msg: anyerror!Receiver.Msg) io.Error!void {
             const self: *Self = @ptrCast(@alignCast(ptr));
-            self.buffer_pos += bytes.len;
             self.recv_count += 1;
+            const msg = err_msg catch unreachable;
+            self.buffer_pos += msg.bytes.len;
+            if (msg.flags.trunc) {
+                self.err = error.MessageTruncated;
+            }
         }
 
         pub fn recv(self: *Self) void {
@@ -335,30 +346,43 @@ test "udp send/receive" {
         .onSend = SendHandler.onSend,
     });
 
-    {
+    { // Send and receive 100 bytes
         const msg1 = "0123456789" ** 10;
         send_handler.udp.send(msg1);
         recv_handler.recv();
 
         while (true) {
-            //std.debug.print(",", .{});
             try io_loop.tick();
             if (recv_handler.recv_count > 0) break;
         }
         try testing.expectEqualSlices(u8, msg1, recv_handler.buffer[0..recv_handler.buffer_pos]);
     }
 
-    {
+    { // Send and recive 110 bytes
         const buffer_head = recv_handler.buffer_pos;
         const msg2 = "abcdefghijk" ** 10;
         send_handler.udp.send(msg2);
         recv_handler.recv();
         while (true) {
-            //std.debug.print(";", .{});
             try io_loop.tick();
             if (recv_handler.recv_count > 1) break;
         }
         try testing.expectEqualSlices(u8, msg2, recv_handler.buffer[buffer_head..recv_handler.buffer_pos]);
+    }
+
+    { // Msg3 will be truncated on receive!
+        const buffer_head = recv_handler.buffer_pos;
+        const msg3 = "xy";
+        send_handler.udp.send(msg3);
+        recv_handler.recv();
+        while (true) {
+            try io_loop.tick();
+            if (recv_handler.recv_count > 2) break;
+        }
+        try testing.expect(recv_handler.err != null);
+        try testing.expectEqual(error.MessageTruncated, recv_handler.err.?);
+        try testing.expectEqual(buffer_head + 1, recv_handler.buffer_pos);
+        try testing.expectEqualSlices(u8, msg3[0..1], recv_handler.buffer[buffer_head..]);
     }
 
     recv_handler.udp.close();
