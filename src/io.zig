@@ -250,6 +250,34 @@ pub const Loop = struct {
         fn onTimer(_: *Self) Error!void {}
         fn onTimerFail(_: *Self, _: anyerror) Error!void {}
     };
+
+    pub fn syncCancel(self: *Loop, user_data: u64) !void {
+        _ = try self.ring.submit();
+
+        var reg = mem.zeroInit(linux.io_uring_sync_cancel_reg, .{
+            .addr = user_data,
+            //.fd = 0,
+            //.flags = linux.IORING_ASYNC_CANCEL_OP,
+            //.opcode = linux.IORING_OP_READ,
+            .timeout = .{ .sec = -1, .nsec = -1 },
+        });
+        const res = linux.io_uring_register(
+            self.ring.fd,
+            .REGISTER_SYNC_CANCEL,
+            @as(*const anyopaque, @ptrCast(&reg)),
+            1,
+        );
+        std.debug.print("res={} {} {} {}\n", .{ res, linux.E.init(res), self.ring.fd, user_data });
+        switch (linux.E.init(res)) {
+            .SUCCESS => return,
+            .NOENT, .ALREADY => return,
+            // One of the fields set in the SQE was invalid.
+            .INVAL => unreachable,
+            else => unreachable, // unexpected
+        }
+        //assert(res == 0);
+        //try handle_register_buf_ring_result(res);
+    }
 };
 
 fn flagMore(cqe: linux.io_uring_cqe) bool {
