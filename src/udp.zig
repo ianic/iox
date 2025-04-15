@@ -142,7 +142,6 @@ pub const Receiver = struct {
         onClose: ?*const fn (*anyopaque) void = null,
     };
 
-    allocator: ?mem.Allocator,
     io_loop: *io.Loop,
     bind_addr: net.Address,
     handler: *anyopaque,
@@ -151,28 +150,15 @@ pub const Receiver = struct {
     op: io.Op = .{},
     recv_op: io.RecvmsgOp = .{},
     socket: posix.socket_t = 0,
-    buffer: ?[]u8 = null,
     state: State = .closed,
 
     const State = enum {
         closed,
         binding,
         open,
+        receiving,
         closing,
     };
-
-    pub fn create(
-        allocator: mem.Allocator,
-        io_loop: *io.Loop,
-        bind_addr: net.Address,
-        handler: *anyopaque,
-        vtable: VTable,
-    ) *Self {
-        const self = allocator.create(Self);
-        self.* = init(io_loop, bind_addr, handler, vtable);
-        self.allocator = allocator;
-        return self;
-    }
 
     pub fn init(
         io_loop: *io.Loop,
@@ -181,7 +167,6 @@ pub const Receiver = struct {
         vtable: VTable,
     ) Self {
         return .{
-            .allocator = null,
             .bind_addr = bind_addr,
             .io_loop = io_loop,
             .handler = handler,
@@ -189,28 +174,26 @@ pub const Receiver = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.close();
-    }
-
     pub fn recv(self: *Self, buffer: []u8) void {
-        assert(self.buffer == null);
-        self.buffer = buffer;
+        assert(self.state != .receiving and self.state != .binding);
+        self.recv_op.setBuffer(buffer);
 
         switch (self.state) {
             .open => self.recvSubmit(),
             .closed => self.bind(),
-            .binding => unreachable,
+            .binding, .receiving => unreachable,
             .closing => self.onError(error.Closing) catch {},
         }
     }
 
     fn recvSubmit(self: *Self) void {
-        const buf = self.buffer.?;
-        self.recv_op.submit(self.io_loop, buf);
+        assert(self.state == .open);
+        self.io_loop.submit(&self.recv_op.op);
+        self.state = .receiving;
     }
 
     fn bind(self: *Self) void {
+        assert(self.state == .closed);
         assert(self.socket == 0);
         self.state = .binding;
         self.op = io.Op.createSocket(
@@ -243,18 +226,18 @@ pub const Receiver = struct {
     }
 
     fn onRecv(self: *Self, err_msg: anyerror!Msg) io.Error!void {
-        self.buffer = null;
+        if (self.state == .closing) return;
+        if (self.state == .receiving) self.state = .open;
         self.vtable.onRecv(self.handler, err_msg) catch {
+            // TODO:
             return self.close();
         };
     }
 
     fn onError(self: *Self, err: anyerror) io.Error!void {
-        self.buffer = null;
-        //if (err != error.OperationCanceled) {
+        if (self.state == .closing) return;
+        // TODO:
         self.vtable.onRecv(self.handler, err) catch {};
-        //}
-        // TODO tko zove close
         self.close();
     }
 
@@ -265,28 +248,21 @@ pub const Receiver = struct {
     pub fn close(self: *Self) void {
         if (self.state == .closed) return;
         if (self.state != .closing) self.state = .closing;
-
         if (self.op.active()) return;
-
         const recv_op = &self.recv_op.op;
         if (recv_op.active() and !recv_op.canceled()) {
             self.op = io.Op.cancel(recv_op, self, onCancel);
             return self.io_loop.submit(&self.op);
         }
-
         if (self.socket != 0) {
             self.op = io.Op.closeSocket(self.socket, self, onCancel);
             self.socket = 0;
             return self.io_loop.submit(&self.op);
         }
-
         if (recv_op.active()) return;
 
         self.state = .closed;
-        if (self.allocator) |allocator|
-            return allocator.destroy(self);
-        if (self.vtable.onClose) |cb|
-            cb(self.handler);
+        if (self.vtable.onClose) |cb| cb(self.handler);
     }
 };
 
@@ -404,7 +380,6 @@ test "udp send/receive" {
     send_handler.udp.close();
     try io_loop.drain();
 
-    try testing.expectEqual(error.OperationCanceled, recv_handler.err.?);
     try testing.expect(send_handler.closed);
     try testing.expect(recv_handler.closed);
 }

@@ -947,6 +947,10 @@ pub const RecvmsgOp = struct {
         };
     }
 
+    pub fn setBuffer(self: *Self, buf: []u8) void {
+        self.iov[0] = .{ .base = buf.ptr, .len = buf.len };
+    }
+
     pub fn submit(self: *Self, loop: *Loop, buf: []u8) void {
         self.iov[0] = .{ .base = buf.ptr, .len = buf.len };
         loop.submit(&self.op);
