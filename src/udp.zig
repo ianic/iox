@@ -9,7 +9,7 @@ const io = @import("io.zig");
 pub const Sender = struct {
     const Self = @This();
 
-    const Result = union(enum) {
+    pub const Result = union(enum) {
         send: struct {
             buf: []const u8,
             err: ?anyerror,
@@ -147,6 +147,7 @@ pub const Receiver = struct {
 
     io_loop: *io.Loop,
     bind_addr: net.Address,
+    bind_flags: io.Op.BindFlags,
     /// Handler of io callback operations
     handler: *anyopaque,
     /// Callback for io operations
@@ -174,11 +175,13 @@ pub const Receiver = struct {
     pub fn init(
         io_loop: *io.Loop,
         bind_addr: net.Address,
+        bind_flags: io.Op.BindFlags,
         handler: *anyopaque,
         callback: *const fn (*anyopaque, Result) void,
     ) Self {
         return .{
             .bind_addr = bind_addr,
+            .bind_flags = bind_flags,
             .io_loop = io_loop,
             .handler = handler,
             .callback = callback,
@@ -220,7 +223,7 @@ pub const Receiver = struct {
 
     fn onSocket(self: *Self, socket: posix.socket_t) io.Error!void {
         self.socket = socket;
-        self.op = io.Op.bind(socket, &self.bind_addr, self, onBind, onError);
+        self.op = io.Op.bind(socket, &self.bind_addr, self.bind_flags, self, onBind, onError);
         self.io_loop.submit(&self.op);
     }
 

@@ -36,7 +36,7 @@ pub fn main() !void {
     rnd.bytes(buffer);
     defer allocator.free(buffer);
 
-    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
+    const addr = net.Address.initIp4([4]u8{ 192, 168, 190, 128 }, 9000);
 
     var handlers: [128]Handler = undefined;
     for (&handlers) |*handler| {

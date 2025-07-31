@@ -18,6 +18,13 @@ const log = std.log.scoped(.io);
 
 pub const Error = error{OutOfMemory};
 
+const yes_socket_option: u32 = 1;
+
+const ip_mreq = extern struct {
+    imr_multiaddr: u32 = 0,
+    imr_address: u32 = 0,
+};
+
 pub const RunError = error{
     OutOfMemory,
     // Next tick will ring.submit at start
@@ -276,6 +283,8 @@ pub const Op = struct {
         bind: struct {
             socket: socket_t,
             addr: *net.Address,
+            ip_mreq: ip_mreq = .{},
+            flags: BindFlags = .{},
         },
         connect: SocketArgs,
         close: struct {
@@ -300,6 +309,12 @@ pub const Op = struct {
         socket: SocketArgs,
         shutdown: socket_t,
         cancel: *Op,
+    };
+
+    pub const BindFlags = packed struct {
+        reuse_addr: bool = true,
+        reuse_port: bool = true,
+        ip_multicast: bool = false,
     };
 
     const SocketArgs = struct {
@@ -404,7 +419,21 @@ pub const Op = struct {
                 .timer => _ = try loop.ring.timeout_remove(@intFromPtr(op), @intFromPtr(op_to_cancel), 0),
                 else => _ = try loop.ring.cancel(@intFromPtr(op), @intFromPtr(op_to_cancel), 0),
             },
-            .bind => |*arg| _ = try loop.ring.bind(@intFromPtr(op), arg.socket, &arg.addr.any, arg.addr.getOsSockLen(), 0),
+            .bind => |*arg| {
+                const yes = mem.asBytes(&yes_socket_option);
+                if (arg.flags.reuse_addr)
+                    (try loop.ring.setsockopt(0, arg.socket, linux.SOL.SOCKET, linux.SO.REUSEADDR, yes)).link_next();
+                if (arg.flags.reuse_port)
+                    (try loop.ring.setsockopt(0, arg.socket, linux.SOL.SOCKET, linux.SO.REUSEPORT, yes)).link_next();
+                if (arg.flags.ip_multicast) {
+                    arg.ip_mreq = .{
+                        .imr_multiaddr = @bitCast(arg.addr.in.sa.addr),
+                        .imr_address = 0,
+                    };
+                    (try loop.ring.setsockopt(0, arg.socket, linux.IPPROTO.IP, linux.IP.ADD_MEMBERSHIP, mem.asBytes(&arg.ip_mreq))).link_next();
+                }
+                _ = try loop.ring.bind(@intFromPtr(op), arg.socket, &arg.addr.any, arg.addr.getOsSockLen(), 0);
+            },
         }
         loop.metric.submit(op.args);
     }
@@ -450,6 +479,7 @@ pub const Op = struct {
     pub fn bind(
         socket: socket_t,
         addr: *net.Address,
+        flags: BindFlags,
         context: anytype,
         comptime success: fn (@TypeOf(context)) Error!void,
         comptime fail: fn (@TypeOf(context), anyerror) Error!void,
@@ -468,7 +498,7 @@ pub const Op = struct {
         return .{
             .context = @intFromPtr(context),
             .callback = wrapper.complete,
-            .args = .{ .bind = .{ .socket = socket, .addr = addr } },
+            .args = .{ .bind = .{ .socket = socket, .addr = addr, .flags = flags } },
         };
     }
 

@@ -34,7 +34,7 @@ pub fn main() !void {
     });
     defer io_loop.deinit();
 
-    const addr = net.Address.initIp4([4]u8{ 127, 0, 0, 1 }, 9000);
+    const addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 9000);
     var server: Server = undefined;
     try server.bind(allocator, &io_loop, addr);
     defer server.deinit();

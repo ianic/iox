@@ -53,6 +53,8 @@ pub fn build(b: *std.Build) void {
 
     // Build all examples from example/ path
     const examples = [_][]const u8{
+        "udp_sender",
+        "udp_receiver",
         "tcp_echo_server",
         "tcp_echo_client",
         "tls_echo_server",
